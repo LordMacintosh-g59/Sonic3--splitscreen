@@ -1,0 +1,143 @@
+/*
+*	Sonic 3 & Knuckles Co-op Mod
+*	coop_players.lemon  —  spawning two independently-controlled player characters
+*
+*	Overrides InitializeGameCharacters() so that the second slot
+*	(0xffffb04a) can be any character (Sonic, Tails or Knuckles),
+*	and both are controlled by their respective gamepads with the
+*	Tails AI permanently disabled in co-op mode.
+*
+*	Also provides getInputForSlot(A0) which replaces the pattern:
+*		control.pad1 if main character, control.tails (pad2) if Tails
+*	with a clean slot-based lookup.
+*
+*	Published under the GNU GPLv3 open source software license.
+*/
+
+
+// ============================================================
+//  HELPER: resolve character update address (mirrors fn006bd8
+//  but for any character, not just competition mode)
+// ============================================================
+
+function u32 coop.charUpdateAddress(u8 charId)
+{
+	if (charId == CHARACTER_SONIC)
+		return addressof(Character.BaseUpdate.Sonic)
+	else if (charId == CHARACTER_TAILS)
+		return addressof(Character.BaseUpdate.Tails)
+	else if (charId == CHARACTER_KNUCKLES)
+		return addressof(Character.BaseUpdate.Knuckles)
+	else
+	{
+		assert(false, "coop.charUpdateAddress: unknown character " + charId)
+		return addressof(Character.BaseUpdate.Sonic)
+	}
+}
+
+// Dust object addresses per slot (from original InitializeGameCharacters)
+constant u32 COOP_DUST_SLOT0 = 0xffffcc54
+constant u32 COOP_DUST_SLOT1 = 0xffffcc9e
+constant u32 COOP_DUST_ADDR  = 0x018b3e
+
+// InstaShield init address (for Sonic)
+// Only slot 0xffffcce8 is used (P1 when Sonic); for P2 we need a separate slot.
+// Using slot 0xffffcd32 (shield slot for P2, which is unused in normal play)
+constant u32 COOP_INSTASHIELD_P2 = 0xffffcd32
+
+
+// ============================================================
+//  InitializeGameCharacters OVERRIDE
+// ============================================================
+
+function void InitializeGameCharacters()
+{
+	if (!coop.active)
+	{
+		base.InitializeGameCharacters()
+		return
+	}
+
+	// Let competition mode and bonus stages run unmodified
+	if (competition_mode.active || (global.zone_act >= 0x1300 && global.zone_act < 0x1600))
+	{
+		base.InitializeGameCharacters()
+		return
+	}
+
+	// ---------- Slot 0 — Player 1 (0xffffb000) ----------
+	u8 p1char = coop.character.p1
+	u32[0xffffb000] = coop.charUpdateAddress(p1char)
+	u8[0xffffb000 + 0x38] = p1char
+
+	// Dust and InstaShield for P1
+	u32[COOP_DUST_SLOT0] = COOP_DUST_ADDR
+	if (p1char == CHARACTER_SONIC)
+	{
+		u32[0xffffcce8] = addressof(InstaShield.Init)
+		u16[0xffffcce8 + 0x42] = 0xb000
+	}
+	else if (p1char == CHARACTER_TAILS)
+	{
+		u16[0xffffb000 + 0x14] += 4		// Tails Y-offset tweak (from original)
+	}
+
+	// ---------- Slot 1 — Player 2 (0xffffb04a) ----------
+	u8 p2char = coop.character.p2
+	u32[0xffffb04a] = coop.charUpdateAddress(p2char)
+	u8[0xffffb04a + 0x38] = p2char
+
+	// Position P2 just to the left of P1 at start
+	u16[0xffffb04a + 0x10] = u16[0xffffb000 + 0x10] - 0x20
+	u16[0xffffb04a + 0x14] = u16[0xffffb000 + 0x14]
+
+	// Dust for P2
+	u32[COOP_DUST_SLOT1] = COOP_DUST_ADDR
+
+	if (p2char == CHARACTER_TAILS)
+	{
+		u16[0xffffb04a + 0x14] += 4		// Tails Y-offset tweak
+	}
+	else if (p2char == CHARACTER_SONIC)
+	{
+		u32[COOP_INSTASHIELD_P2] = addressof(InstaShield.Init)
+		u16[COOP_INSTASHIELD_P2 + 0x42] = 0xb04a
+	}
+
+	// Disable Tails AI regardless of who P2 is
+	tails.ai_routine = 0x30		// Tails Assist (neutral) — keeps it out of the way
+	// If P2 IS Tails, we set ai_routine to 0 to fully disable and let pad2 drive
+	if (p2char == CHARACTER_TAILS)
+		tails.ai_routine = 0
+}
+
+
+// ============================================================
+//  getInputForSlot — replaces the scattered conditional pattern
+//
+//  Returns the address of the pad state word to use for A0's slot.
+//  Callers that previously did:
+//      u8 input = (char.character == TAILS) ? control.tails.state : control.player1.state
+//  should now do:
+//      u8 input = u8[getInputForSlot(A0)]
+//
+//  NOTE: This is a utility for future edits; character.lemon is NOT
+//  modified yet (that is Etapa 3b). This function is declared here
+//  so it's available when those edits land.
+// ============================================================
+
+function u32 getInputForSlot(u32 slotAddress)
+{
+	if (!coop.active)
+	{
+		// Original logic: Tails always uses pad2
+		if (u8[slotAddress + 0x38] == CHARACTER_TAILS && slotAddress != 0xffffb000)
+			return addressof(control.tails)
+		return addressof(control.player1)
+	}
+
+	// Co-op: slot 0 → pad1, slot 1 → pad2
+	if (slotAddress == 0xffffb04a)
+		return addressof(control.pad2)
+	return addressof(control.pad1)
+}

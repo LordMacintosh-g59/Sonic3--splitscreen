@@ -1,0 +1,276 @@
+/*
+*	Sonic 3 & Knuckles Co-op Mod
+*	coop_charselect.lemon  —  character selection for both players
+*
+*	Overrides fn00d6d0 (character cycling), fn00d30c (No Save icon),
+*	fn00d42c (Save Slot new game), SetGlobalCharacters(), and the
+*	game_queries helpers so that each player can pick independently.
+*
+*	Published under the GNU GPLv3 open source software license.
+*/
+
+
+// ============================================================
+//  HELPERS
+// ============================================================
+
+// How many single characters can be chosen (0 = Sonic, 1 = Tails, 2 = Knuckles)
+constant u8 COOP_MAX_CHAR = 2
+
+// Encode a co-op pair as a single byte so it fits in the save slot
+// Formula: p1 * 3 + p2   (values 0-8, always < 16 so it fits in 4 bits)
+function u8 coop.encodePair(u8 p1, u8 p2)
+{
+	return p1 * 3 + p2
+}
+
+function u8 coop.decodePairP1(u8 encoded)
+{
+	return encoded / 3
+}
+
+function u8 coop.decodePairP2(u8 encoded)
+{
+	return encoded % 3
+}
+
+
+// ============================================================
+//  CHARACTER CYCLING (called from the Data Select per-frame update)
+// ============================================================
+
+// Override: fn00d6d0 — cycle the character for the active pad
+// In co-op mode we run this twice: once per player.
+// D0.u8 = current character value in/out, controlled pad is detected by context.
+function void fn00d6d0()
+{
+	u8 character = D0.u8
+
+	if (coop.active)
+	{
+		// P1 uses pad1 (always), P2 uses pad2
+		// Since the original code is called once, we handle P1 only here.
+		// P2 cycling is done in the co-op-specific wrapper below.
+		if (u16[0xffffb04a + 0x30] == 0)
+		{
+			if (control.pad1.pressed & CONTROL_UP)
+			{
+				character = (character < COOP_MAX_CHAR) ? (character + 1) : CHARACTER_SONIC
+				playSound(SFX_CLICK)
+			}
+			else if (control.pad1.pressed & CONTROL_DOWN)
+			{
+				character = (character > CHARACTER_SONIC) ? (character - 1) : COOP_MAX_CHAR
+				playSound(SFX_CLICK)
+			}
+		}
+	}
+	else
+	{
+		// Normal (non-co-op) cycling — replicate original logic
+		base.fn00d6d0()
+		return
+	}
+
+	D0 = character
+}
+
+// Cycle P2's character with pad2 (called from our overrides of fn00d30c / fn00d42c)
+function u8 coop.cycleP2Character(u8 character)
+{
+	if (control.pad2.pressed & CONTROL_UP)
+	{
+		character = (character < COOP_MAX_CHAR) ? (character + 1) : CHARACTER_SONIC
+		playSound(SFX_CLICK)
+	}
+	else if (control.pad2.pressed & CONTROL_DOWN)
+	{
+		character = (character > CHARACTER_SONIC) ? (character - 1) : COOP_MAX_CHAR
+		playSound(SFX_CLICK)
+	}
+	return character
+}
+
+
+// ============================================================
+//  NO-SAVE CHARACTER ICON  (fn00d30c override)
+// ============================================================
+
+// We store the P2 character for No Save in a separate global
+global u8 coop.nosave_char_p2 = CHARACTER_TAILS
+
+function void fn00d30c()
+{
+	if (!coop.active)
+	{
+		base.fn00d30c()
+		return
+	}
+
+	objA0.compound.sprite1.animation.sprite = 0x0f
+	objA0.animation.sprite = dataselect.nosave_characters + 4
+
+	if (dataselect.slot_selected == 0 && u16[0xffffb04a + 0x2e] == 0 && u16[0xffffeee4] == 0)
+	{
+		if (control.pad1.pressed & DataSelect.CONTROLS_ACCEPT)
+		{
+			// Both accept (or just P1? require both for UX clarity)
+			if (control.pad2.pressed & DataSelect.CONTROLS_ACCEPT || true)
+			{
+				coop.character.p1 = dataselect.nosave_characters
+				coop.character.p2 = coop.nosave_char_p2
+				levelselect.characters = CHARS_SONIC_AND_TAILS	// safe generic value
+
+				DataSelect.sharedNewGameStartup()
+				global.active_saveslot = 0
+				DataSelect.SharedGameSlotContinue()
+				DrawObject()
+				return
+			}
+		}
+
+		// Cycle P1 character with pad1
+		D0.u16 = dataselect.nosave_characters
+		fn00d6d0()
+		dataselect.nosave_characters = D0.u16
+
+		// Cycle P2 character with pad2
+		coop.nosave_char_p2 = coop.cycleP2Character(coop.nosave_char_p2)
+
+		objA0.animation.sprite = D0.u8 + 4
+		objA0.compound.count = 1
+		if (level.framecounter.low & 0x10)
+		{
+			fn00d69e()
+			return
+		}
+	}
+
+	objA0.compound.count = 0
+	fn00d69e()
+}
+
+
+// ============================================================
+//  SAVE SLOT NEW GAME  (fn00d42c override)
+// ============================================================
+
+// Store per-slot P2 character in a small parallel array (slot 0..3)
+global u8[4] coop.saveslot_char_p2
+
+function void fn00d42c()
+{
+	if (!coop.active)
+	{
+		base.fn00d42c()
+		return
+	}
+
+	objA0.compound.count = 0
+	A1 = u32[A0 + 0x30]
+
+	D0.u8 = dataselect.slot_selected - 1
+	if (D0.u8 != objA0.flags2e)
+	{
+		u8[A0 + 0x37] = u8[A1 + 0x03]
+		u16[A0 + 0x38] = 0
+	}
+	else
+	{
+		u8 result = fn00d458()
+		if (result == 0)
+			return
+
+		if (result == 1)
+		{
+			u8 slotIndex = objA0.flags2e		// 0..2
+
+			// Accept: start new co-op game
+			if (control.pad1.pressed & DataSelect.CONTROLS_ACCEPT)
+			{
+				coop.character.p1 = u16[A0 + 0x34]
+				coop.character.p2 = coop.saveslot_char_p2[slotIndex]
+				levelselect.characters = CHARS_SONIC_AND_TAILS	// safe generic value
+
+				u32[A1] = 0
+				u8[A1 + 0x02] = (levelselect.characters << 4)
+				u32[A1 + 0x04] = 0
+				u16[A1 + 0x08] = 0x0300
+
+				DataSelect.sharedNewGameStartup()
+				global.active_saveslot = A1
+				DataSelect.SharedGameSlotContinue()
+
+			#if STANDALONE
+				u8[A1 + 0x01] = global.game_random_base
+			#endif
+
+				sram.block_interrupts.u8 = 0xff
+				SaveGameSlot()
+				DrawObject()
+				return
+			}
+
+			// Cycle P1 character with pad1
+			D0.u16 = u16[A0 + 0x34]
+			fn00d6d0()
+			u16[A0 + 0x34] = D0.u16
+
+			// Cycle P2 character with pad2
+			coop.saveslot_char_p2[slotIndex] = coop.cycleP2Character(coop.saveslot_char_p2[slotIndex])
+
+			objA0.compound.count = (level.framecounter.low & 0x10) ? 1 : 0
+		}
+	}
+
+	objA0.animation.sprite = u16[A0 + 0x34] + 4
+	fn00d69e()
+}
+
+
+// ============================================================
+//  SetGlobalCharacters OVERRIDE
+// ============================================================
+
+// In co-op mode, coop.character.p1/p2 are already set by the Data Select.
+// We set global.characters to CHARS_SONIC_AND_TAILS so the engine spawns
+// two slots, and then let the Etapa-3 code replace slot types.
+function void SetGlobalCharacters()
+{
+	if (!coop.active)
+	{
+		base.SetGlobalCharacters()
+		return
+	}
+
+	// Always present two characters
+	global.characters = CHARS_SONIC_AND_TAILS
+	useKnucklesAndTails = false
+}
+
+
+// ============================================================
+//  GAME_QUERIES OVERRIDES
+// ============================================================
+
+// In co-op mode, return coop.character.p1/p2 instead of the legacy globals.
+function u8 getMainCharacter()
+{
+	if (coop.active)
+		return coop.character.p1
+	return base.getMainCharacter()
+}
+
+function u8 getSecondCharacter()
+{
+	if (coop.active)
+		return coop.character.p2		// always a real character
+	return base.getSecondCharacter()
+}
+
+function u8 getNumPlayers()
+{
+	if (coop.active)
+		return 2
+	return base.getNumPlayers()
+}
