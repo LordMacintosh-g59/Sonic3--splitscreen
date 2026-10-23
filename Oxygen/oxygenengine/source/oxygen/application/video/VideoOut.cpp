@@ -309,7 +309,8 @@ void VideoOut::collectGeometries(std::vector<Geometry*>& geometries)
 		{
 			for (const auto& customPlane : pm.getCustomPlanes())
 			{
-				geometries.push_back(&mGeometryFactory.createPlaneGeometry(customPlane.mRect, customPlane.mSourcePlane & 0x03, (customPlane.mSourcePlane & 0x10) != 0, customPlane.mScrollOffsets, customPlane.mRenderQueue));
+				// mSourcePlane bits: 0-2 = plane type (0=B,1=A,2=W,3=DEBUG,4=COOP_B,5=COOP_A), bit 4 = priority flag
+			geometries.push_back(&mGeometryFactory.createPlaneGeometry(customPlane.mRect, (PlaneManager::PlaneType)(customPlane.mSourcePlane & 0x07), (customPlane.mSourcePlane & 0x10) != 0, customPlane.mScrollOffsets, customPlane.mRenderQueue));
 			}
 		}
 	}

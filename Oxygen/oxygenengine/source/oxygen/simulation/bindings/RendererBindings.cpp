@@ -463,6 +463,17 @@ namespace
 		RenderParts::instance().getScrollOffsetsManager().resetOverwriteFlags();
 	}
 
+	// Co-op: fill the specified co-op plane (4=PLANE_COOP_B, 5=PLANE_COOP_A) from level RAM
+	// using P2's camera world coordinates. Must be called each frame before Renderer.setupPlane.
+	void Renderer_fillCoopPlane(uint8 planeIndex, int32 cameraX, int32 cameraY)
+	{
+		PlaneManager& pm = RenderParts::instance().getPlaneManager();
+		if (planeIndex == PlaneManager::PLANE_COOP_B || planeIndex == PlaneManager::PLANE_COOP_A)
+		{
+			pm.fillCoopPlane((PlaneManager::PlaneType)planeIndex, (int)cameraX, (int)cameraY);
+		}
+	}
+
 	void Renderer_resetSprites()
 	{
 		RenderParts::instance().getSpriteManager().setResetRenderItems(0x07);	// All of first three bits
@@ -1235,6 +1246,10 @@ void RendererBindings::registerBindings(lemon::Module& module)
 			.setParameters("px", "py", "width", "height", "planeIndex", "scrollOffsets", "renderQueue");
 
 		builder.addNativeFunction("Renderer.resetCustomPlaneConfigurations", lemon::wrap(&Renderer_resetCustomPlaneConfigurations), defaultFlags);
+
+		// Co-op extension
+		builder.addNativeFunction("Renderer.fillCoopPlane", lemon::wrap(&Renderer_fillCoopPlane), defaultFlags)
+			.setParameters("planeIndex", "cameraX", "cameraY");
 
 		builder.addNativeFunction("Renderer.resetSprites", lemon::wrap(&Renderer_resetSprites), defaultFlags);
 

@@ -85,3 +85,6 @@ include standalone/rendering/?
 include standalone/resources/?
 include standalone/special/?
 #endif
+
+// Co-op mod
+include coop/?

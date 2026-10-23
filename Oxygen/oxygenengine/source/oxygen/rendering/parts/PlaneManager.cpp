@@ -201,7 +201,7 @@ void PlaneManager::setPlayfieldSizeInPixels(const Vec2i& size)
 
 const uint16* PlaneManager::getPlanePatternsBuffer(uint8 index) const
 {
-	RMX_ASSERT(index < 4, "Invalid plane index " << index);
+	RMX_ASSERT(index < PLANE_COUNT, "Invalid plane index " << index);
 	return mPlanePatternsBuffer[index];
 }
 
@@ -219,6 +219,9 @@ uint16 PlaneManager::getPlaneBaseVRAMAddress(int planeIndex) const
 
 const uint16* PlaneManager::getPlaneDataInVRAM(int planeIndex) const
 {
+	// Co-op planes are not backed by VRAM; they live in the pre-filled pattern buffer.
+	if (planeIndex >= PLANE_COOP_B)
+		return mPlanePatternsBuffer[planeIndex];
 	return (const uint16*)(EmulatorInterface::instance().getVRam() + getPlaneBaseVRAMAddress(planeIndex));
 }
 
@@ -480,4 +483,17 @@ void PlaneManager::serializeSaveState(VectorBinarySerializer& serializer, uint8 
 			serializer.serialize(customPlane.mRenderQueue);
 		}
 	}
+}
+
+void PlaneManager::fillCoopPlane(PlaneType planeType, int cameraX, int cameraY)
+{
+	// Validate that this is indeed a co-op plane
+	RMX_ASSERT(planeType == PLANE_COOP_B || planeType == PLANE_COOP_A, "fillCoopPlane called with non-coop plane index " << planeType);
+
+	// Determine screen size the camera covers (standard S3AIR game viewport half)
+	// This matches the co-op split: 400 wide x 112 tall (half of 224)
+	const Vec2i screenSize(400, 112);
+
+	// Use the existing helper to fill from level chunk/tile RAM at the given camera position
+	fillBufferByAbstraction(mPlanePatternsBuffer[planeType], Vec2i(cameraX, cameraY), screenSize);
 }

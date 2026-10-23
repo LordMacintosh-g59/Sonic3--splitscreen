@@ -297,6 +297,10 @@ declare function void Renderer.setVerticalScrollOffsetBias(s16 bias)
 declare function void Renderer.enableDefaultPlane(u8 planeIndex, u8 enabled)
 declare function void Renderer.setupPlane(s16 px, s16 py, s16 width, s16 height, u8 planeIndex, u8 scrollOffsets, u16 renderQueue)
 declare function void Renderer.resetCustomPlaneConfigurations()
+// Co-op extension: fill a co-op plane buffer from level RAM at the given world camera position.
+// planeIndex: 4 = PLANE_COOP_B (background), 5 = PLANE_COOP_A (foreground).
+// Call each frame before Renderer.setupPlane() references these planes.
+declare function void Renderer.fillCoopPlane(u8 planeIndex, s32 cameraX, s32 cameraY)
 declare function void Renderer.resetSprites()
 declare function void Renderer.resetLifetimeContext(u8 lifetimeContext)
 declare function void Renderer.setLifetimeContext(u8 lifetimeContext)

@@ -62,10 +62,10 @@ void OpenGLRenderResources::initialize()
 	mPatternCacheBitmap.create(0x40, 0x800);
 	mPatternCacheTexture.create(BufferTexture::PixelFormat::UINT_8, mPatternCacheBitmap.getSize());
 
-	// Planes & scrolling
+	// Planes & scrolling (indices 0-3: standard planes; 4-5: co-op planes)
 	{
 		const PlaneManager& planeManager = mRenderParts.getPlaneManager();
-		for (int index = 0; index < 4; ++index)
+		for (int index = 0; index < PlaneManager::PLANE_COUNT; ++index)
 		{
 			mPlanePatternsTexture[index].create(BufferTexture::PixelFormat::UINT_16, 0x1000, 1, planeManager.getPlanePatternsBuffer((uint8)index));
 		}
@@ -173,12 +173,13 @@ void OpenGLRenderResources::refresh()
 		mPatternCacheTexture.unbindBuffer();
 	}
 
-	// Update plane pattern textures
+	// Update plane pattern textures (0-3: standard planes; 4-5: co-op planes filled by scripts)
 	{
 		const int numPatterns = planeManager.getPlayfieldSizeInPatterns().x * planeManager.getPlayfieldSizeInPatterns().y;
-		for (int index = 0; index < 4; ++index)
+		for (int index = 0; index < PlaneManager::PLANE_COUNT; ++index)
 		{
-			if (!planeManager.isPlaneUsed(index))
+			// Standard planes: skip if not used; co-op planes always upload (scripts fill them each frame)
+			if (index < PlaneManager::PLANE_COOP_B && !planeManager.isPlaneUsed(index))
 				continue;
 
 			const uint16* buffer = planeManager.getPlanePatternsBuffer((uint8)index);
@@ -239,7 +240,7 @@ const OpenGLTexture& OpenGLRenderResources::getPaletteTexture(const PaletteBase*
 
 const BufferTexture& OpenGLRenderResources::getPlanePatternsTexture(int planeIndex) const
 {
-	RMX_ASSERT(planeIndex >= 0 && planeIndex < 4, "Invalid plane index " << planeIndex);
+	RMX_ASSERT(planeIndex >= 0 && planeIndex < PlaneManager::PLANE_COUNT, "Invalid plane index " << planeIndex);
 	return mPlanePatternsTexture[planeIndex];
 }
 

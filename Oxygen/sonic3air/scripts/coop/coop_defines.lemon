@@ -1,0 +1,43 @@
+/*
+*	Sonic 3 & Knuckles Co-op Mod
+*	coop_defines.lemon  —  global constants, addresses and state variables
+*
+*	Published under the GNU GPLv3 open source software license.
+*/
+
+// ============================================================
+//  CO-OP MODE FLAG
+//  Set to 1 when a co-op game is active; 0 for normal 1P or Competition.
+// ============================================================
+global bool coop.active = 0
+
+
+// ============================================================
+//  CHARACTER SELECTION
+//  P1 and P2 chosen characters (CHARACTER_SONIC=0, TAILS=1, KNUCKLES=2)
+// ============================================================
+global u8 coop.character.p1 = 0		// Character for player 1 (main slot, 0xffffb000)
+global u8 coop.character.p2 = 1		// Character for player 2 (second slot, 0xffffb04a)
+
+
+// ============================================================
+//  FINISH STATE PER PLAYER
+//  0 = still playing, 1 = reached signpost/capsule (waiting for partner)
+// ============================================================
+global u8 coop.finished.p1 = 0
+global u8 coop.finished.p2 = 0
+
+
+// ============================================================
+//  PLANE INDEX CONSTANTS (mirror of C++ PlaneManager::PlaneType)
+// ============================================================
+constant u8 COOP_PLANE_B = 4		// PLANE_COOP_B — background layer for P2 camera
+constant u8 COOP_PLANE_A = 5		// PLANE_COOP_A — foreground layer for P2 camera
+
+
+// ============================================================
+//  VIEWPORT HEIGHT CONSTANTS (matching competition mode values)
+// ============================================================
+constant u16 COOP_VIEWPORT_HEIGHT_UPPER = 108	// Player 1 (top half)
+constant u16 COOP_VIEWPORT_HEIGHT_LOWER = 112	// Player 2 (bottom half)
+// splitScreen2Start = getScreenHeight() - COOP_VIEWPORT_HEIGHT_LOWER

@@ -21,7 +21,14 @@ public:
 		PLANE_B		= 0,	// Plane B, background
 		PLANE_A		= 1,	// Plane A, foreground
 		PLANE_W		= 2,	// Plane W, window (optionally split out of plane A)
-		PLANE_DEBUG	= 3		// Additional plane containing all patterns for debug output
+		PLANE_DEBUG	= 3,	// Additional plane containing all patterns for debug output
+
+		// Co-op extension: extra planes for player 2's independent camera view.
+		// These are NOT backed by VRAM; they are filled each frame via fillCoopPlane().
+		PLANE_COOP_B = 4,	// Co-op plane B (background layer for P2 camera)
+		PLANE_COOP_A = 5,	// Co-op plane A (foreground layer for P2 camera)
+
+		PLANE_COUNT  = 6	// Total number of plane types (including co-op planes)
 	};
 
 	struct CustomPlane
@@ -62,6 +69,11 @@ public:
 
 	const uint16* getPlanePatternsBuffer(uint8 index) const;
 
+	// Co-op: fill the P2 camera plane buffer from level RAM, bypassing VRAM.
+	// Call once per frame (before rendering) with P2's camera world position.
+	// planeType must be PLANE_COOP_B (background) or PLANE_COOP_A (foreground).
+	void fillCoopPlane(PlaneType planeType, int cameraX, int cameraY);
+
 	uint16 getPlaneBaseVRAMAddress(int planeIndex) const;
 	const uint16* getPlaneDataInVRAM(int planeIndex) const;
 	size_t getPlaneSizeInVRAM(int planeIndex) const;
@@ -98,7 +110,7 @@ private:
 	uint16 mNameTableBaseW = 0x8000;
 
 	Vec2i mPlayfieldSize;		// In patterns (8x8 pixels)
-	uint16 mPlanePatternsBuffer[4][0x1000] = { 0 };		// Enough space to support 128 x 32 patterns (though usually only 0x800 is needed, for 64 x 32 patterns)
+	uint16 mPlanePatternsBuffer[PLANE_COUNT][0x1000] = { 0 };	// Indices 0-3: filled from VRAM each frame. Indices 4-5: co-op planes, filled by fillCoopPlane().
 
 	bool mIsPlaneWRightOfSplitX = false;	// If true, plane W is right of plane A, otherwise it's left of plane A
 	bool mIsPlaneWBelowSplitY = false;		// If true, plane W is below plane A, otherwise it's above plane A
@@ -106,6 +118,6 @@ private:
 	uint16 mPlaneAWSplitY = 0;
 	bool mRenderPlaneABehindW = false;		// If true, render plane A fullscreen, even where the screen intersects with plane W
 
-	bool mDisabledDefaultPlane[4];
+	bool mDisabledDefaultPlane[4];	// Only for the four standard planes (0-3)
 	std::vector<CustomPlane> mCustomPlanes;
 };

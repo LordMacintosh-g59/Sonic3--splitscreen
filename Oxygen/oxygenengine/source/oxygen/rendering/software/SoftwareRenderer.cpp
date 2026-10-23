@@ -373,8 +373,12 @@ void SoftwareRenderer::renderPlane(const PlaneGeometry& geometry)
 		bufferedPlaneData.mNonPrioBlocks.clear();
 		bufferedPlaneData.mNonPrioBlocks.reserve(0x800);
 
+		// Co-op planes (PLANE_COOP_B/A) are pre-filled in the patterns buffer; use that directly.
+		// Standard planes use VRAM; getPlaneDataInVRAM handles both cases.
 		const uint16* planeData = planeManager.getPlaneDataInVRAM(geometry.mPlaneIndex);
-		const uint16 numPatternsPerLine = (geometry.mPlaneIndex <= PlaneManager::PLANE_A) ? planeManager.getPlayfieldSizeInPatterns().x : 64;
+		// Co-op planes have the same width as a standard foreground plane (playfield size).
+		const uint16 numPatternsPerLine = (geometry.mPlaneIndex <= PlaneManager::PLANE_A || geometry.mPlaneIndex >= PlaneManager::PLANE_COOP_B)
+			? planeManager.getPlayfieldSizeInPatterns().x : 64;
 		const uint16* scrollOffsetsH = nullptr;
 		const uint16* scrollOffsetsV = nullptr;
 		uint16 scrollMaskH = 0xff;
