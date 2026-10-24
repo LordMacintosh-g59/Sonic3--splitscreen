@@ -149,6 +149,12 @@ public:
 	RescanResult rescanRealDevices();
 	void updatePlayerGamepadAssignments();
 
+	// Co-op: when player 1 has a gamepad and player 2 has none, keyboard 1 controls player 2 instead of player 1
+	void setKeyboardToPlayerWithoutGamepad(bool enable);
+
+	// Bit 0x01 = a keyboard with key mappings, bit 0x02 = a gamepad is assigned to the given player
+	uint8 getPlayerDeviceFlags(int playerIndex) const;
+
 	const std::vector<RealDevice>& getKeyboards() const	{ return mKeyboards; }
 	const std::vector<RealDevice>& getGamepads() const	{ return mGamepads; }
 	uint32 getGamepadsChangeCounter() const  { return mGamepadsChangeCounter; }
@@ -232,6 +238,8 @@ private:
 
 	bool mTouchInputEnabled = false;
 	std::vector<Touch> mActiveTouches;
+
+	bool mKeyboardToPlayerWithoutGamepad = false;
 
 	// Device type of last input -- for keyboard and gamepads, this is affected only by assigned controls, not by any pressed keys/buttons
 	InputType mLastInputType = InputType::NONE;

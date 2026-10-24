@@ -23,6 +23,34 @@
 #include <lemon/runtime/StandardLibrary.h>
 #include <lemon/utility/PragmaSplitter.h>
 
+#include <filesystem>
+#include <map>
+
+
+namespace
+{
+	// True if the compiled script cache is missing or any .lemon file next to the main script is newer than it
+	bool areScriptSourcesNewerThanCache(const std::wstring& mainScriptPath, const std::wstring& compiledScriptPath)
+	{
+		std::error_code ec;
+		const std::filesystem::path compiledPath(compiledScriptPath);
+		if (!std::filesystem::exists(compiledPath, ec))
+			return true;
+
+		const std::filesystem::file_time_type compiledTime = std::filesystem::last_write_time(compiledPath, ec);
+		if (ec)
+			return true;
+
+		const std::filesystem::path scriptsDir = std::filesystem::path(mainScriptPath).parent_path();
+		for (std::filesystem::recursive_directory_iterator it(scriptsDir, ec), end; !ec && it != end; it.increment(ec))
+		{
+			if (it->path().extension() == L".lemon" && it->last_write_time(ec) > compiledTime)
+				return true;
+		}
+		return false;
+	}
+}
+
 
 struct ModuleAppendedInfo : public lemon::Module::AppendedInfo
 {
@@ -334,6 +362,15 @@ LemonScriptProgram::LoadingResult LemonScriptProgram::loadAllScriptModules(lemon
 		}
 		else
 		{
+			// Source build without an official scripts.bin: the fallback cache in saves/ goes stale whenever scripts are edited, so recompile then
+			const std::wstring mainScriptPath = config.mProjectPath + std::wstring(baseScriptFilename);
+			if (!FTX::FileSystem->exists(config.mProjectPath + L"data/scripts.bin") && FTX::FileSystem->exists(mainScriptPath)
+				&& areScriptSourcesNewerThanCache(mainScriptPath, config.mCompiledScriptSavePath))
+			{
+				scriptsLoaded = loadBaseScriptFromSource(globalsLookup, mainScriptPath, coreModuleDependencyHash, loadOptions, loadingResult);
+				RESET_GLOBALS_LOOKUP_ON_FAILURE;
+			}
+
 			// Without dev mode, prefer loading from scripts.bin
 			if (!scriptsLoaded)
 			{
@@ -577,7 +614,15 @@ void LemonScriptProgram::collectHooksFromFunctions(const lemon::GlobalsLookup& g
 {
 	mInternal.mAddressHooks.clear();
 
-	const auto getDeepestFunctionOverload = [](const lemon::GlobalsLookup& globalsLookup, const lemon::ScriptFunction& function) -> const lemon::ScriptFunction&
+	// Scripts deserialized from scripts.bin are not registered in the globals lookup, so collect the last definition of each function from the program itself
+	//  -> Without this, address hooks would always call the hooked function and skip its overloads (e.g. the co-op overrides)
+	std::map<std::pair<uint64, uint32>, const lemon::ScriptFunction*> lastDefinitions;
+	for (const lemon::ScriptFunction* function : mInternal.mProgram.getScriptFunctions())
+	{
+		lastDefinitions[std::make_pair(function->getName().getHash(), function->getSignatureHash())] = function;
+	}
+
+	const auto getDeepestFunctionOverload = [&lastDefinitions](const lemon::GlobalsLookup& globalsLookup, const lemon::ScriptFunction& function) -> const lemon::ScriptFunction&
 	{
 		// Check if there are function overloads for the given function, and return the deepest one or the function itself
 		const lemon::FunctionReference* ref = globalsLookup.getFunctionOverloadByNameAndSignature(function.getName().getHash(), function.getSignatureHash());
@@ -587,6 +632,9 @@ void LemonScriptProgram::collectHooksFromFunctions(const lemon::GlobalsLookup& g
 			if (&func != &function)
 				return func;
 		}
+		const auto it = lastDefinitions.find(std::make_pair(function.getName().getHash(), function.getSignatureHash()));
+		if (it != lastDefinitions.end())
+			return *it->second;
 		return function;
 	};
 

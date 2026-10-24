@@ -2,248 +2,187 @@
 *	Sonic 3 & Knuckles Co-op Mod
 *	coop_charselect.lemon  —  character selection for both players
 *
-*	Overrides fn00d6d0 (character cycling), fn00d30c (No Save icon),
-*	fn00d42c (Save Slot new game), SetGlobalCharacters(), and the
-*	game_queries helpers so that each player can pick independently.
+*	In co-op mode each player picks a character on the Data Select
+*	screen, independently of the save slot:
+*	  - controller 1 up/down cycles P1's character
+*	  - controller 2 up/down cycles P2's character
+*	  (Sonic, Tails, Knuckles each; any pair is allowed)
+*	The choice is shown at the bottom of the screen and applies to
+*	"No Save", new save slots and continued save slots alike.
+*	Save slots themselves always store "Sonic & Tails" in co-op.
 *
 *	Published under the GNU GPLv3 open source software license.
 */
 
 
-// ============================================================
-//  HELPERS
-// ============================================================
+constant u8 COOP_MAX_CHAR = 2		// CHARACTER_SONIC = 0, CHARACTER_TAILS = 1, CHARACTER_KNUCKLES = 2
 
-// How many single characters can be chosen (0 = Sonic, 1 = Tails, 2 = Knuckles)
-constant u8 COOP_MAX_CHAR = 2
+constant string COOP_SELECT_FONT = "oxyfont_regular:gradient:outline(0x000000ff,1,false):shadow(1,1,0.5f,0.8f)"
 
-// Encode a co-op pair as a single byte so it fits in the save slot
-// Formula: p1 * 3 + p2   (values 0-8, always < 16 so it fits in 4 bits)
-function u8 coop.encodePair(u8 p1, u8 p2)
+
+function u8 coop.cycleCharacter(u8 character, u8 pressed)
 {
-	return p1 * 3 + p2
-}
-
-function u8 coop.decodePairP1(u8 encoded)
-{
-	return encoded / 3
-}
-
-function u8 coop.decodePairP2(u8 encoded)
-{
-	return encoded % 3
-}
-
-
-// ============================================================
-//  CHARACTER CYCLING (called from the Data Select per-frame update)
-// ============================================================
-
-// Override: fn00d6d0 — cycle the character for the active pad
-// In co-op mode we run this twice: once per player.
-// D0.u8 = current character value in/out, controlled pad is detected by context.
-function void fn00d6d0()
-{
-	u8 character = D0.u8
-
-	if (coop.active)
+	if (pressed & CONTROL_UP)
 	{
-		// P1 uses pad1 (always), P2 uses pad2
-		// Since the original code is called once, we handle P1 only here.
-		// P2 cycling is done in the co-op-specific wrapper below.
-		if (u16[0xffffb04a + 0x30] == 0)
-		{
-			if (control.pad1.pressed & CONTROL_UP)
-			{
-				character = (character < COOP_MAX_CHAR) ? (character + 1) : CHARACTER_SONIC
-				playSound(SFX_CLICK)
-			}
-			else if (control.pad1.pressed & CONTROL_DOWN)
-			{
-				character = (character > CHARACTER_SONIC) ? (character - 1) : COOP_MAX_CHAR
-				playSound(SFX_CLICK)
-			}
-		}
-	}
-	else
-	{
-		// Normal (non-co-op) cycling — replicate original logic
-		base.fn00d6d0()
-		return
-	}
-
-	D0 = character
-}
-
-// Cycle P2's character with pad2 (called from our overrides of fn00d30c / fn00d42c)
-function u8 coop.cycleP2Character(u8 character)
-{
-	if (control.pad2.pressed & CONTROL_UP)
-	{
-		character = (character < COOP_MAX_CHAR) ? (character + 1) : CHARACTER_SONIC
 		playSound(SFX_CLICK)
+		return (character < COOP_MAX_CHAR) ? (character + 1) : CHARACTER_SONIC
 	}
-	else if (control.pad2.pressed & CONTROL_DOWN)
+	if (pressed & CONTROL_DOWN)
 	{
-		character = (character > CHARACTER_SONIC) ? (character - 1) : COOP_MAX_CHAR
 		playSound(SFX_CLICK)
+		return (character > CHARACTER_SONIC) ? (character - 1) : COOP_MAX_CHAR
 	}
 	return character
 }
 
+function string coop.characterName(u8 character)
+{
+	if (character == CHARACTER_TAILS)
+		return "TAILS"
+	if (character == CHARACTER_KNUCKLES)
+		return "KNUCKLES"
+	return "SONIC"
+}
+
+function string coop.deviceName(u8 deviceFlags)
+{
+	if (deviceFlags == 3)
+		return "CONTROLE + TECLADO"
+	if (deviceFlags == 2)
+		return "CONTROLE"
+	if (deviceFlags == 1)
+		return "TECLADO"
+	return "NENHUM"
+}
+
+// Data Select character icon (animation sprite) for the current pair
+function u8 coop.pairIconSprite()
+{
+	if (coop.character.p1 == CHARACTER_SONIC && coop.character.p2 == CHARACTER_TAILS)
+		return 4		// Sonic & Tails
+	if (coop.character.p1 == CHARACTER_KNUCKLES && coop.character.p2 == CHARACTER_TAILS)
+		return 8		// Knuckles & Tails
+	return 5 + coop.character.p1		// 5 = Sonic, 6 = Tails, 7 = Knuckles
+}
+
+// True if the highlighted save slot is a completed game, where controller 1 up/down picks the zone instead
+function bool coop.isCompletedSlotSelected()
+{
+	if (dataselect.slot_selected == 0)
+		return false
+	u32 slot = 0xffffe6ac + u32(dataselect.slot_selected - 1) * 10
+	return ((u8[slot] & 0x80) == 0) && ((u8[slot] & 0x03) != 0)
+}
+
+// Called once per Data Select frame
+function void coop.updateDataSelect()
+{
+	if (!coop.isCompletedSlotSelected())
+	{
+		coop.character.p1 = coop.cycleCharacter(coop.character.p1, control.pad1.pressed)
+	}
+	coop.character.p2 = coop.cycleCharacter(coop.character.p2, control.pad2.pressed)
+
+#if STANDALONE
+	// L on any device (key E / LB) swaps which player uses the gamepad and which one the keyboard.
+	// Checked per simulation frame (bit 0x0400 = L), as "Input.buttonPressed" can stay set for several simulation frames.
+	// After a swap the pads read the other devices, so L would look newly pressed again: wait until it's released everywhere.
+	bool pressedL = false
+	bool heldL = false
+	for (u8 pad = 0; pad < 2; ++pad)
+	{
+		if (Input.getController(pad) & 0x0400)
+		{
+			heldL = true
+			if (!(Input.getControllerPrevious(pad) & 0x0400))
+				pressedL = true
+		}
+	}
+	if (!heldL)
+		coop.deviceSwapLatch = false
+	if (pressedL && !coop.deviceSwapLatch)
+	{
+		coop.deviceSwapLatch = true
+		Game.swapCoopPlayerDevices()
+		playSound(SFX_CLICK)
+	}
+
+	s32 py = getScreenHeight() - 34
+	Renderer.drawText(COOP_SELECT_FONT, 8, py,      "P1: " + coop.deviceName(Game.getCoopPlayerDevices(0)), 0x80c0ffff, 4, 0, 0xf000, false, true)
+	Renderer.drawText(COOP_SELECT_FONT, 8, py + 12, coop.characterName(coop.character.p1), 0xffffffff, 4, 0, 0xf000, false, true)
+	Renderer.drawText(COOP_SELECT_FONT, getScreenWidth() - 8, py,      "P2: " + coop.deviceName(Game.getCoopPlayerDevices(1)), 0xffc060ff, 6, 0, 0xf000, false, true)
+	Renderer.drawText(COOP_SELECT_FONT, getScreenWidth() - 8, py + 12, coop.characterName(coop.character.p2), 0xffffffff, 6, 0, 0xf000, false, true)
+	Renderer.drawText(COOP_SELECT_FONT, 8, py - 24, "Cima/baixo: personagem", 0xc0c0c0ff, 4, 0, 0xf000, false, true)
+	Renderer.drawText(COOP_SELECT_FONT, 8, py - 12, "L (tecla E / LB): trocar controle e teclado", 0xc0c0c0ff, 4, 0, 0xf000, false, true)
+#endif
+}
+
 
 // ============================================================
-//  NO-SAVE CHARACTER ICON  (fn00d30c override)
+//  Data Select overrides
+//  The base functions keep handling slots, zones and starting the
+//  game; in co-op they always see "Sonic & Tails" (two character
+//  slots), and the character cycling is done by coop.updateDataSelect.
 // ============================================================
 
-// We store the P2 character for No Save in a separate global
-global u8 coop.nosave_char_p2 = CHARACTER_TAILS
+// Character cycling of the base game: disabled in co-op
+function void fn00d6d0()
+{
+	if (!coop.isActive())
+	{
+		base.fn00d6d0()
+	}
+}
 
+// "No Save" icon and start
 function void fn00d30c()
 {
-	if (!coop.active)
+	if (!coop.isActive())
 	{
 		base.fn00d30c()
 		return
 	}
 
-	objA0.compound.sprite1.animation.sprite = 0x0f
-	objA0.animation.sprite = dataselect.nosave_characters + 4
-
-	if (dataselect.slot_selected == 0 && u16[0xffffb04a + 0x2e] == 0 && u16[0xffffeee4] == 0)
-	{
-		if (control.pad1.pressed & DataSelect.CONTROLS_ACCEPT)
-		{
-			// Both accept (or just P1? require both for UX clarity)
-			if (control.pad2.pressed & DataSelect.CONTROLS_ACCEPT || true)
-			{
-				coop.character.p1 = dataselect.nosave_characters
-				coop.character.p2 = coop.nosave_char_p2
-				levelselect.characters = CHARS_SONIC_AND_TAILS	// safe generic value
-
-				DataSelect.sharedNewGameStartup()
-				global.active_saveslot = 0
-				DataSelect.SharedGameSlotContinue()
-				DrawObject()
-				return
-			}
-		}
-
-		// Cycle P1 character with pad1
-		D0.u16 = dataselect.nosave_characters
-		fn00d6d0()
-		dataselect.nosave_characters = D0.u16
-
-		// Cycle P2 character with pad2
-		coop.nosave_char_p2 = coop.cycleP2Character(coop.nosave_char_p2)
-
-		objA0.animation.sprite = D0.u8 + 4
-		objA0.compound.count = 1
-		if (level.framecounter.low & 0x10)
-		{
-			fn00d69e()
-			return
-		}
-	}
-
-	objA0.compound.count = 0
-	fn00d69e()
+	dataselect.nosave_characters = CHARS_SONIC_AND_TAILS
+	base.fn00d30c()
+	objA0.animation.sprite = coop.pairIconSprite()
 }
 
-
-// ============================================================
-//  SAVE SLOT NEW GAME  (fn00d42c override)
-// ============================================================
-
-// Store per-slot P2 character in a small parallel array (slot 0..3)
-global u8[4] coop.saveslot_char_p2
-
+// Save slot icon, new game and continue
 function void fn00d42c()
 {
-	if (!coop.active)
+	if (!coop.isActive())
 	{
 		base.fn00d42c()
 		return
 	}
 
-	objA0.compound.count = 0
-	A1 = u32[A0 + 0x30]
-
-	D0.u8 = dataselect.slot_selected - 1
-	if (D0.u8 != objA0.flags2e)
+	// New games get stored as "Sonic & Tails"; used slots keep their stored value
+	u32 slot = u32[A0 + 0x30]
+	if (u8[slot] & 0x80)
 	{
-		u8[A0 + 0x37] = u8[A1 + 0x03]
-		u16[A0 + 0x38] = 0
-	}
-	else
-	{
-		u8 result = fn00d458()
-		if (result == 0)
-			return
-
-		if (result == 1)
-		{
-			u8 slotIndex = objA0.flags2e		// 0..2
-
-			// Accept: start new co-op game
-			if (control.pad1.pressed & DataSelect.CONTROLS_ACCEPT)
-			{
-				coop.character.p1 = u16[A0 + 0x34]
-				coop.character.p2 = coop.saveslot_char_p2[slotIndex]
-				levelselect.characters = CHARS_SONIC_AND_TAILS	// safe generic value
-
-				u32[A1] = 0
-				u8[A1 + 0x02] = (levelselect.characters << 4)
-				u32[A1 + 0x04] = 0
-				u16[A1 + 0x08] = 0x0300
-
-				DataSelect.sharedNewGameStartup()
-				global.active_saveslot = A1
-				DataSelect.SharedGameSlotContinue()
-
-			#if STANDALONE
-				u8[A1 + 0x01] = global.game_random_base
-			#endif
-
-				sram.block_interrupts.u8 = 0xff
-				SaveGameSlot()
-				DrawObject()
-				return
-			}
-
-			// Cycle P1 character with pad1
-			D0.u16 = u16[A0 + 0x34]
-			fn00d6d0()
-			u16[A0 + 0x34] = D0.u16
-
-			// Cycle P2 character with pad2
-			coop.saveslot_char_p2[slotIndex] = coop.cycleP2Character(coop.saveslot_char_p2[slotIndex])
-
-			objA0.compound.count = (level.framecounter.low & 0x10) ? 1 : 0
-		}
+		u16[A0 + 0x34] = CHARS_SONIC_AND_TAILS
 	}
 
-	objA0.animation.sprite = u16[A0 + 0x34] + 4
-	fn00d69e()
+	base.fn00d42c()
+	objA0.animation.sprite = coop.pairIconSprite()
 }
 
 
 // ============================================================
 //  SetGlobalCharacters OVERRIDE
+//  Co-op always needs both character slots; their actual characters
+//  come from coop.character.p1/p2 (see InitializeGameCharacters).
 // ============================================================
 
-// In co-op mode, coop.character.p1/p2 are already set by the Data Select.
-// We set global.characters to CHARS_SONIC_AND_TAILS so the engine spawns
-// two slots, and then let the Etapa-3 code replace slot types.
 function void SetGlobalCharacters()
 {
-	if (!coop.active)
+	if (!coop.isActive())
 	{
 		base.SetGlobalCharacters()
 		return
 	}
 
-	// Always present two characters
 	global.characters = CHARS_SONIC_AND_TAILS
 	useKnucklesAndTails = false
 }
@@ -253,24 +192,29 @@ function void SetGlobalCharacters()
 //  GAME_QUERIES OVERRIDES
 // ============================================================
 
-// In co-op mode, return coop.character.p1/p2 instead of the legacy globals.
 function u8 getMainCharacter()
 {
-	if (coop.active)
+	if (coop.isActive())
+	{
 		return coop.character.p1
+	}
 	return base.getMainCharacter()
 }
 
 function u8 getSecondCharacter()
 {
-	if (coop.active)
-		return coop.character.p2		// always a real character
+	if (coop.isActive())
+	{
+		return coop.character.p2
+	}
 	return base.getSecondCharacter()
 }
 
 function u8 getNumPlayers()
 {
-	if (coop.active)
+	if (coop.isActive())
+	{
 		return 2
+	}
 	return base.getNumPlayers()
 }

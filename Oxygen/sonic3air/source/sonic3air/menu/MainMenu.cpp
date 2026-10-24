@@ -30,6 +30,7 @@ namespace mainmenu
 	enum Entry
 	{
 		NORMAL_GAME	= 0x01,
+		COOP_GAME	= 0x04,
 		ACT_SELECT	= 0x02,
 		TIME_ATTACK	= 0x03,
 		OPTIONS		= 0x10,
@@ -45,8 +46,9 @@ MainMenu::MainMenu(MenuBackground& menuBackground) :
 {
 	// Build up menu structure
 	{
-		mMenuEntries.reserve(6);
+		mMenuEntries.reserve(8);
 		mMenuEntries.addEntry("NORMAL GAME", mainmenu::NORMAL_GAME);
+		mMenuEntries.addEntry("CO-OP GAME",  mainmenu::COOP_GAME);
 		mMenuEntries.addEntry("ACT SELECT",  mainmenu::ACT_SELECT);
 		mMenuEntries.addEntry("TIME ATTACK", mainmenu::TIME_ATTACK);
 		mMenuEntries.addEntry("OPTIONS",	 mainmenu::OPTIONS);
@@ -152,10 +154,17 @@ void MainMenu::update(float timeElapsed)
 				switch (selectedData)
 				{
 					case mainmenu::NORMAL_GAME:
+						Game::instance().setCoopMode(false);
+						triggerStartNormalGame();
+						break;
+
+					case mainmenu::COOP_GAME:
+						Game::instance().setCoopMode(true);
 						triggerStartNormalGame();
 						break;
 
 					case mainmenu::ACT_SELECT:
+						Game::instance().setCoopMode(false);
 						triggerStartActSelect();
 						break;
 
@@ -242,10 +251,10 @@ void MainMenu::render()
 
 	Drawer& drawer = EngineMain::instance().getDrawer();
 
-	const int positionY[] = { 31, 58, 85,  125, 146, 167,  195 };
+	const int positionY[] = { 22, 47, 72, 97,  128, 149, 170,  196 };
 	for (size_t line = 0; line < mMenuEntries.size(); ++line)
 	{
-		bool isMainEntry = (line < 3);
+		bool isMainEntry = (line < 4);
 
 		const auto& entry = mMenuEntries[line];
 		const std::string& text = entry.mOptions.empty() ? entry.mText : entry.mOptions[entry.mSelectedIndex].mText;

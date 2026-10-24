@@ -1,6 +1,6 @@
-/*
+﻿/*
 *	Sonic 3 & Knuckles Co-op Mod
-*	coop_players.lemon  —  spawning two independently-controlled player characters
+*	coop_players.lemon  â€”  spawning two independently-controlled player characters
 *
 *	Overrides InitializeGameCharacters() so that the second slot
 *	(0xffffb04a) can be any character (Sonic, Tails or Knuckles),
@@ -23,15 +23,17 @@
 function u32 coop.charUpdateAddress(u8 charId)
 {
 	if (charId == CHARACTER_SONIC)
-		return addressof(Character.BaseUpdate.Sonic)
+	{
+		return 0x010a94		// Character.BaseUpdate.Sonic (the renderer identifies characters by these addresses)
+	}
 	else if (charId == CHARACTER_TAILS)
-		return addressof(Character.BaseUpdate.Tails)
+		return 0x01365c		// Character.BaseUpdate.Tails
 	else if (charId == CHARACTER_KNUCKLES)
-		return addressof(Character.BaseUpdate.Knuckles)
+		return 0x016444		// Character.BaseUpdate.Knuckles
 	else
 	{
 		assert(false, "coop.charUpdateAddress: unknown character " + charId)
-		return addressof(Character.BaseUpdate.Sonic)
+		return 0x010a94
 	}
 }
 
@@ -52,7 +54,7 @@ constant u32 COOP_INSTASHIELD_P2 = 0xffffcd32
 
 function void InitializeGameCharacters()
 {
-	if (!coop.active)
+	if (!coop.isActive())
 	{
 		base.InitializeGameCharacters()
 		return
@@ -65,7 +67,7 @@ function void InitializeGameCharacters()
 		return
 	}
 
-	// ---------- Slot 0 — Player 1 (0xffffb000) ----------
+	// ---------- Slot 0 â€” Player 1 (0xffffb000) ----------
 	u8 p1char = coop.character.p1
 	u32[0xffffb000] = coop.charUpdateAddress(p1char)
 	u8[0xffffb000 + 0x38] = p1char
@@ -82,10 +84,11 @@ function void InitializeGameCharacters()
 		u16[0xffffb000 + 0x14] += 4		// Tails Y-offset tweak (from original)
 	}
 
-	// ---------- Slot 1 — Player 2 (0xffffb04a) ----------
+	// ---------- Slot 1 â€” Player 2 (0xffffb04a) ----------
 	u8 p2char = coop.character.p2
 	u32[0xffffb04a] = coop.charUpdateAddress(p2char)
 	u8[0xffffb04a + 0x38] = p2char
+	coop.p2Waiting = true		// Player 2 only enters once the level starts, see coop.updatePlayer2Waiting
 
 	// Position P2 just to the left of P1 at start
 	u16[0xffffb04a + 0x10] = u16[0xffffb000 + 0x10] - 0x20
@@ -104,16 +107,187 @@ function void InitializeGameCharacters()
 		u16[COOP_INSTASHIELD_P2 + 0x42] = 0xb04a
 	}
 
-	// Disable Tails AI regardless of who P2 is
-	tails.ai_routine = 0x30		// Tails Assist (neutral) — keeps it out of the way
-	// If P2 IS Tails, we set ai_routine to 0 to fully disable and let pad2 drive
-	if (p2char == CHARACTER_TAILS)
-		tails.ai_routine = 0
+	// The Tails AI is never run for player 2 in co-op (see Character.TailsAI.Update), and a player 1 Tails needs the neutral routine
+	tails.ai_routine = 0
 }
 
 
 // ============================================================
-//  getInputForSlot — replaces the scattered conditional pattern
+//  PLAYER 2 WAITING FOR THE LEVEL START
+//  Intro cutscenes (e.g. Angel Island 1) only know player 1 and the
+//  original sidekick; a player 2 spawned there falls out of the level
+//  and dies over and over. So until the level actually starts
+//  (title card done and player 1 controllable), player 2 is an
+//  invisible object without physics that just follows player 1.
+// ============================================================
+
+function bool coop.isPlayer2Waiting()
+{
+	return coop.isActive() && coop.p2Waiting
+}
+
+// Returns true while player 2 is still waiting, i.e. its character update must be skipped (no physics, no drawing)
+function bool coop.updatePlayer2Waiting()
+{
+	if (!coop.isActive() || A0 != 0xffffb04a || !coop.p2Waiting || competition_mode.active)
+		return false
+
+	u16 p1x = u16[0xffffb000 + 0x10]
+	u16 p1y = u16[0xffffb000 + 0x14]
+	objA0.position.x.u16 = p1x
+	objA0.position.y.u16 = p1y
+
+	bool levelStarted = (global.level_started != 0 && player1.control_override == 0 && u8[0xffffb000 + 0x05] == base_state.NORMAL)
+	if (!levelStarted)
+		return true
+
+	// Enter the level as the chosen character, right next to player 1 (characters don't collide with each other)
+	coop.p2Waiting = false
+	char.base_state = base_state.INITIAL
+	objA0.position.x.u16 = p1x - 0x10
+	objA0.position.y.u16 = p1y
+	char.render_flags = u8[0xffffb000 + 0x04]
+	char.sprite_attributes = u16[0xffffb000 + 0x0a]
+	char.layer_flags1 = u8[0xffffb000 + 0x46]
+	char.layer_flags2 = u8[0xffffb000 + 0x47]
+	char.invuln.countdown = 0x78
+
+	camera.position.x.u16.player2 = camera.position.x.u16
+	camera.position.y.u16.player2 = camera.position.y.u16
+	coop.p2CameraLocked = false
+	return true
+}
+
+// The update addresses stay the original ones (the renderer identifies characters by them); only the waiting check is added
+function void Character.BaseUpdate.Sonic()
+{
+	if (coop.updatePlayer2Waiting())
+		return
+	base.Character.BaseUpdate.Sonic()
+}
+
+function void Character.BaseUpdate.Tails()
+{
+	if (coop.updatePlayer2Waiting())
+		return
+	base.Character.BaseUpdate.Tails()
+}
+
+function void Character.BaseUpdate.Knuckles()
+{
+	if (coop.updatePlayer2Waiting())
+		return
+	base.Character.BaseUpdate.Knuckles()
+}
+
+
+// ============================================================
+//  INDEPENDENT INPUT FOR PLAYER 2
+//
+//  Character code reads its input from control.player1 (Sonic and
+//  Knuckles, copied from control.pad1 at the start of their update)
+//  or control.tails (Tails). Level objects read control.player1 for
+//  the first slot and control.tails for the second slot.
+//  So while P2's character updates, controller 2 is put in place of
+//  controller 1; afterwards control.tails holds controller 2 for the
+//  objects updated later in the frame.
+// ============================================================
+
+global u16 coop.savedPad1
+global u16 coop.savedPlayer1
+
+function bool coop.isPlayer2Slot()
+{
+	return coop.isActive() && A0 == 0xffffb04a && !competition_mode.active
+}
+
+function void coop.beginPlayer2Input()
+{
+	coop.savedPad1 = control.pad1
+	coop.savedPlayer1 = control.player1
+	control.pad1 = control.pad2
+	// The base update only copies the pad when player 1 has no control override (cutscenes) - player 2 must never get player 1's input
+	control.player1 = control.pad2
+}
+
+function void coop.endPlayer2Input()
+{
+	control.pad1 = coop.savedPad1
+	control.player1 = coop.savedPlayer1
+	if (player2.control_override == 0)
+	{
+		control.tails = control.pad2
+	}
+}
+
+// Character.BaseUpdate.* must stay untouched: the renderer recognizes characters by their original update addresses.
+// The input swap happens one level deeper, in the normal (controllable) state update.
+
+// Player 2 as Sonic: own input, own look up/down offset and own dust object
+function void Character.UpdateNormalState.Sonic()
+{
+	if (!coop.isPlayer2Slot())
+	{
+		base.Character.UpdateNormalState.Sonic()
+		return
+	}
+
+	A5 = addressof(camera.yoffset.tails)
+	A6 = 0xffffcc9e
+	coop.beginPlayer2Input()
+	base.Character.UpdateNormalState.Sonic()
+	coop.endPlayer2Input()
+}
+
+// Player 2 as Knuckles: same as Sonic
+function void Character.UpdateNormalState.Knuckles()
+{
+	if (!coop.isPlayer2Slot())
+	{
+		base.Character.UpdateNormalState.Knuckles()
+		return
+	}
+
+	A5 = addressof(camera.yoffset.tails)
+	A6 = 0xffffcc9e
+	coop.beginPlayer2Input()
+	base.Character.UpdateNormalState.Knuckles()
+	coop.endPlayer2Input()
+}
+
+// Player 2 as Tails already reads controller 2 (control.tails = control.pad2)
+function void Character.UpdateNormalState.Tails()
+{
+	if (coop.isPlayer2Slot() && player2.control_override == 0)
+	{
+		// The base update copies controller 2 and then runs the Tails AI, which mimics player 1's input.
+		// A negative control override makes it skip both, so controller 2 is fed here directly instead.
+		control.tails = control.pad2
+		player2.control_override = -1
+		base.Character.UpdateNormalState.Tails()
+		player2.control_override = 0
+		return
+	}
+
+	base.Character.UpdateNormalState.Tails()
+	if (coop.isActive() && !competition_mode.active && A0 == 0xffffb000 && player2.control_override == 0)
+	{
+		// Player 1 as Tails leaves controller 1 in control.tails - objects updated later expect controller 2 there
+		control.tails = control.pad2
+	}
+}
+
+// No Tails AI for a human player 2 (it would copy player 1's input)
+function void Character.TailsAI.Update()
+{
+	if (coop.isPlayer2Slot())
+		return
+	base.Character.TailsAI.Update()
+}
+
+
+// ============================================================
+//  getInputForSlot â€” replaces the scattered conditional pattern
 //
 //  Returns the address of the pad state word to use for A0's slot.
 //  Callers that previously did:
@@ -128,16 +302,20 @@ function void InitializeGameCharacters()
 
 function u32 getInputForSlot(u32 slotAddress)
 {
-	if (!coop.active)
+	if (!coop.isActive())
 	{
 		// Original logic: Tails always uses pad2
 		if (u8[slotAddress + 0x38] == CHARACTER_TAILS && slotAddress != 0xffffb000)
+		{
 			return addressof(control.tails)
+		}
 		return addressof(control.player1)
 	}
 
-	// Co-op: slot 0 → pad1, slot 1 → pad2
+	// Co-op: slot 0 â†’ pad1, slot 1 â†’ pad2
 	if (slotAddress == 0xffffb04a)
+	{
 		return addressof(control.pad2)
+	}
 	return addressof(control.pad1)
 }

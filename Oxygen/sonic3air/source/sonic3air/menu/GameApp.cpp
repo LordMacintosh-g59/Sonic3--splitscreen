@@ -71,9 +71,15 @@ void GameApp::initialize()
 	Simulation& simulation = Application::instance().getSimulation();
 	simulation.setRunning(false);
 
-	gotoPhase(Configuration::instance().mStartPhase);
-	if (Configuration::instance().mLoadLevel >= 0 && Configuration::instance().mLoadLevel <= 0xffff)
+	const bool loadLevel = (Configuration::instance().mLoadLevel >= 0 && Configuration::instance().mLoadLevel <= 0xffff);
+	if (loadLevel || !startIntroVideo(Configuration::instance().mStartPhase))
 	{
+		gotoPhase(Configuration::instance().mStartPhase);
+	}
+	if (loadLevel)
+	{
+		// Dev shortcut straight into a level is used for testing co-op
+		Game::instance().setCoopMode(true);
 		Game::instance().startIntoLevel(Game::Mode::UNDEFINED, 0, Configuration::instance().mLoadLevel, Configuration::instance().mUseCharacters);
 	}
 
@@ -111,6 +117,11 @@ void GameApp::keyboard(const rmx::KeyboardEvent& ev)
 void GameApp::update(float timeElapsed)
 {
 	GuiBase::update(timeElapsed);
+
+	if (mCurrentState == State::INTRO_VIDEO)
+	{
+		updateIntroVideo(timeElapsed);
+	}
 
 	// Update disclaimer fade-in / fade-out
 	{
@@ -192,6 +203,64 @@ void GameApp::render()
 	}
 
 	GuiBase::render();
+
+	if (mCurrentState == State::INTRO_VIDEO && mIntroTexture.isValid())
+	{
+		const Recti& screenRect = FTX::screenRect();
+		const Rectf rect = RenderUtils::getLetterBoxRect(screenRect, (float)mIntroTexture.getWidth() / (float)mIntroTexture.getHeight());
+		drawer.setBlendMode(BlendMode::OPAQUE);
+		drawer.drawRect(Rectf((float)screenRect.x, (float)screenRect.y, (float)screenRect.width, (float)screenRect.height), Color(0.0f, 0.0f, 0.0f));
+		drawer.setSamplingMode(SamplingMode::BILINEAR);
+		drawer.drawRect(rect, mIntroTexture);
+		drawer.setSamplingMode(SamplingMode::POINT);
+		drawer.performRendering();
+	}
+}
+
+bool GameApp::startIntroVideo(int followingPhase)
+{
+	if (!FTX::FileSystem->exists(L"data/images/intro/frame_000.jpg"))
+		return false;
+
+	mCurrentState = State::INTRO_VIDEO;
+	mIntroFollowingPhase = followingPhase;
+	mIntroTime = 0.0f;
+	mIntroShownFrame = -1;
+	AudioOut::instance().playAudioDirect(rmx::getMurmur2_64(std::string("coop_intro")), AudioOut::SoundRegType::JINGLE, AudioOut::CONTEXT_MENU + AudioOut::CONTEXT_MUSIC);
+	return true;
+}
+
+void GameApp::updateIntroVideo(float timeElapsed)
+{
+	static const constexpr float INTRO_FPS = 24.0f;
+	static const constexpr float SKIP_GRACE_TIME = 0.5f;
+
+	mIntroTime += std::min(timeElapsed, 0.25f);
+	if (mIntroTime > SKIP_GRACE_TIME && InputManager::instance().anythingPressed())
+	{
+		endIntroVideo();
+		return;
+	}
+
+	const int frame = (int)(mIntroTime * INTRO_FPS);
+	if (frame != mIntroShownFrame)
+	{
+		// The video ends with the first frame number that has no image file
+		if (!FileHelper::loadTexture(mIntroTexture, *String(0, "data/images/intro/frame_%03d.jpg", frame).toWString(), false))
+		{
+			endIntroVideo();
+			return;
+		}
+		mIntroShownFrame = frame;
+	}
+}
+
+void GameApp::endIntroVideo()
+{
+	AudioOut::instance().stopSoundContext(AudioOut::CONTEXT_MENU + AudioOut::CONTEXT_MUSIC);
+	mIntroTexture.clearBitmap();
+	mCurrentState = State::UNDEFINED;
+	gotoPhase(mIntroFollowingPhase);
 }
 
 void GameApp::onStartGame()
@@ -227,6 +296,9 @@ void GameApp::openMainMenu()
 	mMenuBackground->openGameStartedMenu();
 
 	Game::instance().resetCurrentMode();
+	Game::instance().setCoopMode(false);	// The menu is controlled by player 1 again (incl. the keyboard)
+	if (ControlsIn::instance().areGamepadsSwitched())
+		ControlsIn::instance().switchGamepads();	// Undo a co-op device swap, it would otherwise leave single player without its gamepad
 }
 
 void GameApp::openOptionsMenuInGame()

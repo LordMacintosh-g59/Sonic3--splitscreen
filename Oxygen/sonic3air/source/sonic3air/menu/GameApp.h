@@ -58,11 +58,15 @@ public:
 
 private:
 	void gotoPhase(int phaseNumber);
+	bool startIntroVideo(int followingPhase);
+	void updateIntroVideo(float timeElapsed);
+	void endIntroVideo();
 
 private:
 	enum class State
 	{
 		UNDEFINED = 0,
+		INTRO_VIDEO,
 		DISCLAIMER,
 		TITLE_SCREEN,
 		MAIN_MENU,
@@ -75,6 +79,11 @@ private:
 
 	DrawerTexture mDisclaimerTexture;
 	float mDisclaimerVisibility = 0.0f;
+
+	DrawerTexture mIntroTexture;
+	float mIntroTime = 0.0f;
+	int mIntroShownFrame = -1;
+	int mIntroFollowingPhase = 0;
 
 	GameView* mGameView = nullptr;
 	GameMenuManager* mGameMenuManager = nullptr;

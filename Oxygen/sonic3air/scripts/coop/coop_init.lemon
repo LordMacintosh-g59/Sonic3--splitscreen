@@ -2,45 +2,28 @@
 *	Sonic 3 & Knuckles Co-op Mod
 *	coop_init.lemon  —  initialisation and game-start hooks
 *
-*	TEMPORARY: coop.active is forced on. A proper in-game toggle
-*	(e.g. button C on the Data Select screen) will replace this
-*	in a later iteration.
+*	Co-op is switched on/off by the "CO-OP GAME" / "NORMAL GAME"
+*	entries of the main menu (see coop.isActive in coop_defines).
 *
 *	Published under the GNU GPLv3 open source software license.
 */
 
 
 // ============================================================
-//  FORCE CO-OP ON AT START
-//  Override DataSelect.sharedNewGameStartup to set coop.active
+//  NEW GAME STARTUP
 // ============================================================
 
 function void DataSelect.sharedNewGameStartup()
 {
-	// Mark co-op as active for this session
-	coop.active = true
-
-	// Run original startup (resets zones, emeralds, etc.)
-	base.DataSelect.sharedNewGameStartup()
-
-	// Log in script output for debugging
-#if STANDALONE
-	debugLog("Co-op mode ACTIVE: P1=" + coop.character.p1 + " P2=" + coop.character.p2)
-#endif
-}
-
-
-// ============================================================
-//  RESET CO-OP STATE ON GAME OVER / RETURN TO MAIN MENU
-//  We hook into the general reset path
-// ============================================================
-
-// Called whenever a clean-slate reset is needed (title screen, etc.)
-function void coop.reset()
-{
-	coop.active = false
-	coop.character.p1 = CHARACTER_SONIC
-	coop.character.p2 = CHARACTER_TAILS
 	coop.finished.p1 = 0
 	coop.finished.p2 = 0
+
+	base.DataSelect.sharedNewGameStartup()
+
+#if STANDALONE
+	if (coop.isActive())
+	{
+		debugLog("Co-op mode ACTIVE: P1=" + coop.character.p1 + " P2=" + coop.character.p2)
+	}
+#endif
 }

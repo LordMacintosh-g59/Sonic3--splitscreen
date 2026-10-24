@@ -15,56 +15,63 @@
 
 namespace
 {
-	void fillBufferByAbstraction(uint16* buffer, const Vec2i& cameraPosition, const Vec2i& screenSize)
+	// Co-op planes use a fixed 64x32 pattern ring buffer (512x256 pixels), see RenderPlaneShader
+	static constexpr int COOP_BUF_W = 64;
+	static constexpr int COOP_BUF_H = 32;
+
+	// S3K level data in RAM
+	static constexpr uint32 LAYOUT_HEADER   = 0xffff8000;	// u16 widths (FG, BG) and heights (FG, BG) in chunks
+	static constexpr uint32 LAYOUT_ROW_PTRS = 0xffff8008;	// Per chunk row: u16 FG row pointer, u16 BG row pointer
+	static constexpr uint32 CHUNK_TABLE     = 0xffff0000;	// 128x128 chunks, 8x8 block words each (0x80 bytes)
+	static constexpr uint32 BLOCK_TABLE     = 0xffff9000;	// 16x16 blocks, 2x2 pattern words each (8 bytes)
+
+	inline int wrapIndex(int value, int size)
 	{
-		// TODO: This is entirely S3AIR-specific
-		const uint32 minCameraTileX = cameraPosition.x / 16;
-		const uint32 minCameraTileY = cameraPosition.y / 16;
+		return (size > 0) ? (((value % size) + size) % size) : 0;
+	}
 
-		const uint32 width = (screenSize.x + 15) / 16;		// Usually 32; measured in tiles, not patterns (so we have to multiply by 2 here and there to get patterns)
-		const uint32 height = (screenSize.y + 15) / 16;		// Usually 16
+	// Fills the ring buffer with the level layout around the camera, at the same ring positions the VDP name tables use,
+	// so the plane is drawn with the camera position as scroll offset just like the standard planes
+	void fillCoopBufferFromLevelLayout(uint16* buffer, bool foreground, const Vec2i& cameraPosition)
+	{
+		EmulatorInterface& emulatorInterface = EmulatorInterface::instance();
+		const int layerOffset = foreground ? 0 : 2;
+		const int layoutWidth  = emulatorInterface.readMemory16(LAYOUT_HEADER + layerOffset);
+		const int layoutHeight = emulatorInterface.readMemory16(LAYOUT_HEADER + 4 + layerOffset);
 
-		for (uint32 y = 0; y < height; ++y)
+		// The whole ring buffer is filled (32x16 blocks), starting slightly above/left of the camera
+		const int firstBlockX = (cameraPosition.x >> 4) - 2;
+		const int firstBlockY = (cameraPosition.y >> 4) - 2;
+
+		for (int by = 0; by < COOP_BUF_H / 2; ++by)
 		{
-			uint16* lineBase0 = &buffer[(y*2) * width*2];
-			uint16* lineBase1 = &buffer[(y*2+1) * width*2];
+			const int blockY = firstBlockY + by;
+			const int chunkRow = wrapIndex(blockY >> 3, layoutHeight);
+			const uint32 rowAddress = CHUNK_TABLE + emulatorInterface.readMemory16(LAYOUT_ROW_PTRS + chunkRow * 4 + layerOffset);
+			const int py0 = (blockY * 2) & (COOP_BUF_H - 1);
+			const int py1 = (py0 + 1) & (COOP_BUF_H - 1);
 
-			for (uint32 x = 0; x < width; ++x)
+			for (int bx = 0; bx < COOP_BUF_W / 2; ++bx)
 			{
-				// Chunk coordinates
-				const uint32 globalColumn = minCameraTileX + ((x - minCameraTileX) % width);
-				const uint32 globalRow = minCameraTileY + ((y - minCameraTileY) % height);
+				const int blockX = firstBlockX + bx;
+				const int chunkColumn = wrapIndex(blockX >> 3, layoutWidth);
+				const uint8 chunkIndex = emulatorInterface.readMemory8(rowAddress + chunkColumn);
 
-				const uint32 chunkColumn = globalColumn / 8;
-				const uint32 chunkRow = (globalRow / 8) & 0x1f;		// Looks like there are only 32 chunks in y-direction allowed in a level; that makes a maximum level height of 4096 pixels
-
-				const uint32 chunkAddress = 0xffff0000 + EmulatorInterface::instance().readMemory16(0xffff8008 + chunkRow * 4) + chunkColumn;
-				const uint8  chunkType = EmulatorInterface::instance().readMemory8(chunkAddress);
-
-				// Tile coordinates inside chunk
-				const uint32 tileColumn = globalColumn % 8;
-				const uint32 tileRow = globalRow % 8;
-
-				const uint32 tileAddress = 0xffff0000 + EmulatorInterface::instance().readMemory16(0x00f02a + chunkType * 2) + tileRow * 16 + tileColumn * 2;
-				const uint16 tile = EmulatorInterface::instance().readMemory16(tileAddress);
-
-				// Access tile graphics (consisting of 2x2 sprite patterns)
-				const uint32 tilePatternBaseAddress = 0xffff9000 + (tile & 0x03ff) * 8;
-
-				const bool flipX = (tile & 0x0400) != 0;
-				const bool flipY = (tile & 0x0800) != 0;
+				const uint16 blockWord = emulatorInterface.readMemory16(CHUNK_TABLE + chunkIndex * 0x80 + ((blockY & 7) * 8 + (blockX & 7)) * 2);
+				const uint32 blockAddress = BLOCK_TABLE + (blockWord & 0x03ff) * 8;
+				const bool flipX = (blockWord & 0x0400) != 0;
+				const bool flipY = (blockWord & 0x0800) != 0;
+				const uint16 flipMask = (uint16)((blockWord & 0x0c00) << 1);	// Block flip bits -> pattern flip bits (0x0800 / 0x1000)
 				const uint32 mx = flipX ? 2 : 0;
 				const uint32 my = flipY ? 4 : 0;
-				const uint16 xorMask = (tile & 0x0c00) << 1;
 
-				// Write 2x2 sprite patterns of this tile
-				lineBase0[0] = EmulatorInterface::instance().readMemory16(tilePatternBaseAddress     + mx + my) ^ xorMask;
-				lineBase0[1] = EmulatorInterface::instance().readMemory16(tilePatternBaseAddress + 2 - mx + my) ^ xorMask;
-				lineBase1[0] = EmulatorInterface::instance().readMemory16(tilePatternBaseAddress + 4 + mx - my) ^ xorMask;
-				lineBase1[1] = EmulatorInterface::instance().readMemory16(tilePatternBaseAddress + 6 - mx - my) ^ xorMask;
+				const int px0 = (blockX * 2) & (COOP_BUF_W - 1);
+				const int px1 = (px0 + 1) & (COOP_BUF_W - 1);
 
-				lineBase0 += 2;
-				lineBase1 += 2;
+				buffer[py0 * COOP_BUF_W + px0] = emulatorInterface.readMemory16(blockAddress     + mx + my) ^ flipMask;
+				buffer[py0 * COOP_BUF_W + px1] = emulatorInterface.readMemory16(blockAddress + 2 - mx + my) ^ flipMask;
+				buffer[py1 * COOP_BUF_W + px0] = emulatorInterface.readMemory16(blockAddress + 4 + mx - my) ^ flipMask;
+				buffer[py1 * COOP_BUF_W + px1] = emulatorInterface.readMemory16(blockAddress + 6 - mx - my) ^ flipMask;
 			}
 		}
 	}
@@ -487,13 +494,6 @@ void PlaneManager::serializeSaveState(VectorBinarySerializer& serializer, uint8 
 
 void PlaneManager::fillCoopPlane(PlaneType planeType, int cameraX, int cameraY)
 {
-	// Validate that this is indeed a co-op plane
 	RMX_ASSERT(planeType == PLANE_COOP_B || planeType == PLANE_COOP_A, "fillCoopPlane called with non-coop plane index " << planeType);
-
-	// Determine screen size the camera covers (standard S3AIR game viewport half)
-	// This matches the co-op split: 400 wide x 112 tall (half of 224)
-	const Vec2i screenSize(400, 112);
-
-	// Use the existing helper to fill from level chunk/tile RAM at the given camera position
-	fillBufferByAbstraction(mPlanePatternsBuffer[planeType], Vec2i(cameraX, cameraY), screenSize);
+	fillCoopBufferFromLevelLayout(mPlanePatternsBuffer[planeType], planeType == PLANE_COOP_A, Vec2i(cameraX, cameraY));
 }

@@ -76,6 +76,11 @@ public:
 	inline bool isInMainMenuMode() const	{ return mMode == Mode::MAIN_MENU_BG; }
 	inline void resetCurrentMode()			{ mMode = Mode::UNDEFINED; }
 
+	inline void setCoopMode(bool enable)	{ mCoopMode = enable; }
+	bool isCoopMode();
+	uint8 getCoopPlayerDevices(uint8 player);
+	void swapCoopPlayerDevices();
+
 	inline PlayerRecorder& getPlayerRecorder()	{ return mPlayerRecorder; }
 
 	RemasteredMusicDownload& getRemasteredMusicDownload()  { return mRemasteredMusicDownload; }
@@ -134,6 +139,7 @@ private:
 
 	Mode mMode = Mode::UNDEFINED;
 	uint32 mSubMode = 0;
+	bool mCoopMode = false;
 
 	BlueSpheresRendering mBlueSpheresRendering;
 	PlayerProgress mPlayerProgress;

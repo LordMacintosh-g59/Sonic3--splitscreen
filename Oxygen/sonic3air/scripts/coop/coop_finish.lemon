@@ -1,0 +1,228 @@
+/*
+*	Sonic 3 & Knuckles Co-op Mod
+*	coop_finish.lemon  —  "both players must reach the end"
+*
+*	Etapa 7 scope:
+*	  - The level does NOT end until both P1 and P2 have reached
+*	    the signpost or capsule area.
+*	  - Signpost (normal act end): the signpost trigger is P1-driven
+*	    as usual.  The win-pose and level-results are deferred until
+*	    P2's world-X also reaches the signpost X position.
+*	  - Capsule (boss act end): win is triggered once P1 is on the
+*	    ground AND P2 is alive and also on the ground.
+*	  - Both players get a win pose, then the single level-results
+*	    screen appears as usual.
+*	  - fn0838c2: do NOT lock P2 input in co-op — P2 must still
+*	    reach the signpost on their own.
+*
+*	Published under the GNU GPLv3 open source software license.
+*/
+
+
+// ============================================================
+//  HELPER: trigger win pose for both players and level results
+//  A0 must be the triggering object (signpost or capsule).
+// ============================================================
+
+function void coop.triggerWinSequence()
+{
+	coop.finished.p1 = 1
+	coop.finished.p2 = 1
+
+	// Win pose for P1
+	A1 = 0xffffb000
+	StartCharacterWinPose()
+
+	// Win pose for P2 (reuses the same signpost/capsule object in A0)
+	A1 = 0xffffb04a
+	if (u8[A1 + 0x05] < base_state.DIED)
+	{
+		StartCharacterWinPose()
+	}
+
+	// Allocate the level-results object
+	if (allocDynamicObjectStd())
+	{
+		objA1.update_address = addressof(LevelResults.Update)
+	}
+
+#if STANDALONE
+	Game.onZoneActCompleted(global.zone_act.apparent)
+#endif
+}
+
+
+// ============================================================
+//  fn0838c2 OVERRIDE  (signpost settled on ground — start
+//  the spinning-down animation and prepare the win sequence)
+//
+//  Original sets player2.control_override = 0xff to freeze
+//  the Tails AI in 1-player mode.  In co-op that would lock
+//  P2's controller, preventing them from ever reaching the end.
+//  We skip that line; everything else is identical.
+// ============================================================
+
+function void fn0838c2()
+{
+	if (!coop.isActive())
+	{
+		base.fn0838c2()
+		return
+	}
+
+	if (objA0.flags38 & 0x01)
+	{
+		Object.AnimationProgressByLocalA1()
+		--objA0.countdown_value
+		if (objA0.countdown_value >= 0)
+		{
+			return
+		}
+
+		objA0.base_state = 0x06
+		u8[0xfffffabe] = 0xff
+		objA0.velocity.x = 0
+		objA0.velocity.y = 0
+		objA0.animation.sprite = u8[0x08390e + global.characters]
+		// NOTE: player2.control_override intentionally NOT set in co-op
+	}
+	else
+	{
+		// Signpost hit a hidden monitor instead of the ground
+		objA0.base_state = 0x02
+		objA0.state = 0x20
+		objA0.velocity.y = -0x200
+	}
+}
+
+
+// ============================================================
+//  fn083912 OVERRIDE  (signpost win-pose trigger)
+//
+//  Polls each frame after the signpost has settled.
+//  Original: fires when P1 is on the ground.
+//  Co-op:    also requires P2's world-X >= signpost X, so P2
+//            must physically reach the end before results show.
+//
+//  While waiting for P2:
+//    - P1 keeps full control (they're past the end already).
+//    - A brief on-screen message could be added later.
+// ============================================================
+
+function void fn083912()
+{
+	if (!coop.isActive())
+	{
+		base.fn083912()
+		return
+	}
+
+	// Wait for P1 to land on the ground (same as original check)
+	A1 = 0xffffb000
+	if (u8[A1 + 0x2a] & char.flag.IN_AIR)
+	{
+		return
+	}
+
+	// Wait for P2 to reach the signpost X position
+	// (objA0 is the signpost; its X is where the sign landed)
+	u16 signpostX = objA0.position.x.u16
+	u16 p2x      = u16[0xffffb04a + 0x10]
+	if (p2x < signpostX)
+	{
+		return
+	}
+
+	// Both players at the finish — trigger win
+	objA0.base_state = 0x08
+	coop.triggerWinSequence()
+}
+
+
+// ============================================================
+//  fn0868f8 OVERRIDE  (standard capsule / boss-end trigger)
+//
+//  Original fires when P1 is on the ground and alive.
+//  Co-op: also requires P2 to be alive and on the ground.
+//
+//  D0.u8 is set by callers to the next base_state value for
+//  the capsule object (0x06, 0x0e, etc.) — preserved as-is.
+// ============================================================
+
+function void fn0868f8()
+{
+	if (!coop.isActive())
+	{
+		base.fn0868f8()
+		return
+	}
+
+	--objA0.countdown_value
+	if (objA0.countdown_value >= 0)
+	{
+		return
+	}
+
+	// P1 check (identical to original)
+	A1 = 0xffffb000
+	bool p1ready = ((u8[A1 + 0x2a] & 0x80) == 0) && ((u8[A1 + 0x2a] & char.flag.IN_AIR) == 0) && (u8[A1 + 0x05] < base_state.DIED)
+	if (!p1ready)
+	{
+		return
+	}
+
+	// P2 check: must be alive and on the ground (boss arena is shared,
+	// so P2 should already be nearby via the teleport-to-leader system)
+	A1 = 0xffffb04a
+	bool p2ready = (u8[A1 + 0x05] < base_state.DIED) && ((u8[A1 + 0x2a] & char.flag.IN_AIR) == 0)
+	if (!p2ready)
+	{
+		return
+	}
+
+	// Both players ready — trigger win
+	objA0.base_state = D0.u8
+	coop.triggerWinSequence()
+}
+
+
+// ============================================================
+//  fn086984 OVERRIDE  (fly-away capsule variant — MGZ 2 only)
+//
+//  The capsule flies left before disappearing; win is triggered
+//  when P1 is alive, visible, and on the boss platform.
+//  Co-op: same P2-alive+grounded requirement as fn0868f8.
+// ============================================================
+
+function void fn086984()
+{
+	if (!coop.isActive())
+	{
+		base.fn086984()
+		return
+	}
+
+	--objA0.countdown_value
+	if (objA0.countdown_value >= 0)
+	{
+		return
+	}
+
+	A1 = 0xffffb000
+	bool p1ready = (u8[A1 + 0x05] < base_state.DIED) && (objA1.render_flags & render_flag.VISIBLE) && (u8[A1 + 0x38] == 1 || tails.carrying)
+	if (!p1ready)
+	{
+		return
+	}
+
+	A1 = 0xffffb04a
+	bool p2ready = (u8[A1 + 0x05] < base_state.DIED) && ((u8[A1 + 0x2a] & char.flag.IN_AIR) == 0)
+	if (!p2ready)
+	{
+		return
+	}
+
+	objA0.velocity.x = -0x100
+	objA0.base_state = D0.u8
+	coop.triggerWinSequence()
+}

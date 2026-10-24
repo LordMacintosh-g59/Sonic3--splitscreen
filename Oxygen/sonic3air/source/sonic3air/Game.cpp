@@ -101,6 +101,9 @@ void Game::update(float timeElapsed)
 	// Update game client
 	mGameClient.updateClient(timeElapsed);
 
+	// In co-op, a player without gamepad can use the main keyboard
+	InputManager::instance().setKeyboardToPlayerWithoutGamepad(isCoopMode());
+
 	// Update sprite redirects (like input icons)
 	mDynamicSprites.updateSpriteRedirects();
 
@@ -189,6 +192,9 @@ void Game::registerScriptBindings(lemon::Module& module)
 		builder.addNativeFunction("Game.openOptionsMenu", lemon::wrap(*this, &Game::openOptionsMenu), defaultFlags);
 
 		builder.addNativeFunction("Game.isNormalGame", lemon::wrap(*this, &Game::isNormalGame), defaultFlags);
+		builder.addNativeFunction("Game.isCoopMode", lemon::wrap(*this, &Game::isCoopMode), defaultFlags);
+		builder.addNativeFunction("Game.getCoopPlayerDevices", lemon::wrap(*this, &Game::getCoopPlayerDevices), defaultFlags);
+		builder.addNativeFunction("Game.swapCoopPlayerDevices", lemon::wrap(*this, &Game::swapCoopPlayerDevices), defaultFlags);
 		builder.addNativeFunction("Game.isTimeAttack", lemon::wrap(*this, &Game::isTimeAttack), defaultFlags);
 		builder.addNativeFunction("Game.onTimeAttackFinish", lemon::wrap(*this, &Game::onTimeAttackFinish), defaultFlags);
 
@@ -327,6 +333,24 @@ void Game::checkForUnlockedSecrets(bool saveIfAnyUnlocked)
 void Game::unlockSecret(uint32 secretId)
 {
 	setSecretUnlocked(secretId);
+}
+
+bool Game::isCoopMode()
+{
+	// Only the modes that run the normal story levels support co-op; UNDEFINED is the dev "LoadLevel" entry
+	return mCoopMode && (mMode == Mode::NORMAL_GAME || mMode == Mode::ACT_SELECT || mMode == Mode::UNDEFINED);
+}
+
+uint8 Game::getCoopPlayerDevices(uint8 player)
+{
+	// The game's controller N may be fed by the other player's devices when the gamepads are switched (F4 or swapCoopPlayerDevices)
+	const int inputPlayer = ControlsIn::instance().areGamepadsSwitched() ? (player ^ 1) : player;
+	return InputManager::instance().getPlayerDeviceFlags(inputPlayer);
+}
+
+void Game::swapCoopPlayerDevices()
+{
+	ControlsIn::instance().switchGamepads();
 }
 
 void Game::startIntoTitleScreen()

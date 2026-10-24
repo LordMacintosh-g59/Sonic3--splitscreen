@@ -7,9 +7,12 @@
 
 // ============================================================
 //  CO-OP MODE FLAG
-//  Set to 1 when a co-op game is active; 0 for normal 1P or Competition.
+//  True when "CO-OP GAME" was chosen in the main menu (decided by the engine).
 // ============================================================
-global bool coop.active = 0
+function bool coop.isActive()
+{
+	return Game.isCoopMode()
+}
 
 
 // ============================================================
@@ -24,6 +27,15 @@ global u8 coop.character.p2 = 1		// Character for player 2 (second slot, 0xffffb
 //  FINISH STATE PER PLAYER
 //  0 = still playing, 1 = reached signpost/capsule (waiting for partner)
 // ============================================================
+// P2 camera lock (player2.camera_lock is used by the base game outside competition mode)
+global bool coop.p2CameraLocked = false
+
+// Player 2 waits (invisible, no physics) until the level actually starts, e.g. after intro cutscenes
+global bool coop.p2Waiting = false
+
+// Data Select: set while the device swap button is held, so one press swaps exactly once
+global bool coop.deviceSwapLatch = false
+
 global u8 coop.finished.p1 = 0
 global u8 coop.finished.p2 = 0
 
@@ -41,3 +53,32 @@ constant u8 COOP_PLANE_A = 5		// PLANE_COOP_A — foreground layer for P2 camera
 constant u16 COOP_VIEWPORT_HEIGHT_UPPER = 108	// Player 1 (top half)
 constant u16 COOP_VIEWPORT_HEIGHT_LOWER = 112	// Player 2 (bottom half)
 // splitScreen2Start = getScreenHeight() - COOP_VIEWPORT_HEIGHT_LOWER
+
+
+// ============================================================
+//  BONUS STAGE EXIT TRACKING
+//  Set to true when each player has cleared the bonus stage.
+//  Reset at the start of every new bonus stage visit.
+// ============================================================
+global bool coop.bonus.p1exited = false
+global bool coop.bonus.p2exited = false
+
+
+// ============================================================
+//  SPECIAL STAGE (BLUE SPHERES) ELIMINATION TRACKING
+//  Reset at the start of every BS visit (fn009212 override).
+//  Reserved for future use: currently only p1.eliminated is
+//  actionable since fn00972e (red sphere hit) is P1-only.
+//  When a full state-swap architecture is implemented, p2.eliminated
+//  will control P2's independent elimination path.
+// ============================================================
+global bool coop.bs.p1.eliminated = false
+global bool coop.bs.p2.eliminated = false
+
+
+// ============================================================
+//  INTRO VIDEO STATE
+//  Defined here so both coop_init.lemon and coop_intro.lemon
+//  can reference them; actual update logic lives in coop_intro.
+// ============================================================
+// (globals are declared inside coop_intro.lemon to keep scope clear)

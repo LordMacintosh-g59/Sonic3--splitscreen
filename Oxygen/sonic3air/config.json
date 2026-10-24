@@ -16,7 +16,7 @@
 	"PlatformFlags": "-1",
 
 	// Game
-	"StartPhase": "2",				// 0: Disclaimer, 1: Title Screen, 2: Main Menu, 3: In-game (loading a save state)
+	"StartPhase": "1",				// 0: Disclaimer, 1: Title Screen, 2: Main Menu, 3: In-game (loading a save state)
 
 	// Video
 	"WindowSize": "1600 x 960",

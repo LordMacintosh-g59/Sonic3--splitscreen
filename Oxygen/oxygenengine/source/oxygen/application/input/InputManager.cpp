@@ -934,12 +934,23 @@ void InputManager::updatePlayerGamepadAssignments()
 			gamepad->mAssignedPlayer = playerIndex;
 		}
 	}
+	bool hasGamepad[NUM_PLAYERS] = { false };
 	for (RealDevice& gamepad : mGamepads)
 	{
 		if (gamepad.mAssignedPlayer >= 0)
 		{
 			devicesByPlayer[gamepad.mAssignedPlayer].push_back(&gamepad);
+			hasGamepad[gamepad.mAssignedPlayer] = true;
 		}
+	}
+
+	if (mKeyboardToPlayerWithoutGamepad && hasGamepad[0] && !hasGamepad[1])
+	{
+		// Player 1 plays with the gamepad, so player 2 gets the main keyboard
+		std::vector<RealDevice*>& player1Devices = devicesByPlayer[0];
+		player1Devices.erase(std::remove(player1Devices.begin(), player1Devices.end(), &mKeyboards[0]), player1Devices.end());
+		devicesByPlayer[1].push_back(&mKeyboards[0]);
+		mKeyboards[0].mAssignedPlayer = 1;
 	}
 
 	// Re-assign controls for the controller schemes
@@ -972,6 +983,38 @@ void InputManager::updatePlayerGamepadAssignments()
 	// Explicitly add the Android back button
 	mPlayers[0].mController.Back.addInput(mKeyboards[0], InputConfig::Assignment::Type::BUTTON, SDLK_AC_BACK);
 #endif
+}
+
+uint8 InputManager::getPlayerDeviceFlags(int playerIndex) const
+{
+	uint8 flags = 0;
+	for (const RealDevice& keyboard : mKeyboards)
+	{
+		if (keyboard.mAssignedPlayer != playerIndex)
+			continue;
+		for (const auto& mapping : keyboard.mControlMappings)
+		{
+			if (!mapping.mAssignments.empty())
+			{
+				flags |= 0x01;
+				break;
+			}
+		}
+	}
+	for (const RealDevice& gamepad : mGamepads)
+	{
+		if (gamepad.mAssignedPlayer == playerIndex)
+			flags |= 0x02;
+	}
+	return flags;
+}
+
+void InputManager::setKeyboardToPlayerWithoutGamepad(bool enable)
+{
+	if (mKeyboardToPlayerWithoutGamepad == enable)
+		return;
+	mKeyboardToPlayerWithoutGamepad = enable;
+	updatePlayerGamepadAssignments();
 }
 
 const InputManager::RealDevice* InputManager::getGamepadByJoystickInstanceId(int32 joystickInstanceId) const

@@ -1,0 +1,252 @@
+﻿/*
+*	Sonic 3 & Knuckles Co-op Mod
+*	coop_world.lemon  â€”  world simulation for two cameras
+*
+*	Etapa 5 scope:
+*	  - Object despawn: do NOT despawn an object that is still
+*	    visible to P2's camera even if it left P1's range.
+*	  - Character move borders: P2 uses its own move_area variables
+*	    so each player is constrained independently.
+*	  - Move area sync: keep P2's area variables updated to match P1's
+*	    (they traverse the same level, just at different paces).
+*	  - Teleport-to-leader: if P2 falls behind the advancing left
+*	    boundary (boss arenas, act transitions) it is teleported to
+*	    just beside P1, with brief invincibility.
+*
+*	KNOWN LIMITATION (future work):
+*	  DynamicObjectsLoading.UpdateDefault is NOT overridden here.
+*	  It remains P1-camera-centred for spawn.  Objects near P2's
+*	  camera that are out of P1's range will not be spawned until
+*	  P1 approaches them.  The despawn guard below prevents already-
+*	  loaded objects from disappearing, which is the more critical fix.
+*
+*	Published under the GNU GPLv3 open source software license.
+*/
+
+
+// ============================================================
+//  HELPERS
+// ============================================================
+
+// Number of pixels outside both cameras at which an object is dropped.
+// Matches the original threshold (0x280 = 640px = 1.6 screens).
+// Objects between the two cameras are always kept alive.
+constant u16 COOP_DESPAWN_THRESHOLD = 0x280
+
+// Distance (px) that triggers P2 teleport to P1.
+// 0x600 = 1536 pixels â‰ˆ 3.8 screens.  Covers typical boss-arena lock distance.
+constant u16 COOP_TELEPORT_THRESHOLD = 0x600
+
+// Invincibility frames given to P2 after teleport (~3 seconds at 60fps)
+constant u8 COOP_TELEPORT_INVINCIBILITY = 120
+
+
+// ============================================================
+//  shouldUnloadObjectAtPosition OVERRIDE
+//  Keep an object alive if it is still inside P2's camera window,
+//  even if it has left P1's window.
+// ============================================================
+
+function bool shouldUnloadObjectAtPosition(u16 px, u16 threshold)
+{
+	if (!coop.isActive())
+	{
+		return base.shouldUnloadObjectAtPosition(px, threshold)
+	}
+
+	// Standard P1 check (uses level.despawn_position.x, set by UpdateDefault)
+	bool outsideP1 = ((px & 0xff80) - level.despawn_position.x > threshold)
+
+	// If still in P1's window, keep loaded regardless of P2
+	if (!outsideP1)
+	{
+		return false
+	}
+
+	// Check P2's camera window
+	u16 p2CamX = camera.position.x.u16.player2	// 0xffffee60
+	u16 p2DespawnX = (p2CamX - 0x80) & 0xff80
+	bool outsideP2 = ((px & 0xff80) - p2DespawnX > threshold)
+
+	// Only despawn when outside BOTH cameras
+	return outsideP2
+}
+
+// One-arg overload forwards here, so the override above covers both callers.
+function bool shouldUnloadObjectAtPosition(u16 px)
+{
+	if (!coop.isActive())
+	{
+		return base.shouldUnloadObjectAtPosition(px)
+	}
+	return shouldUnloadObjectAtPosition(px, COOP_DESPAWN_THRESHOLD)
+}
+
+
+// ============================================================
+//  Character.CheckAgainstMoveBorders OVERRIDE
+//  P2 slot (0xffffb04a) uses move_area.*.player2 in co-op mode.
+// ============================================================
+
+function void Character.CheckAgainstMoveBorders()
+{
+	if (!coop.isActive() || A0 != 0xffffb04a)
+	{
+		base.Character.CheckAgainstMoveBorders()
+		return
+	}
+
+	// Mirror of the original, but using P2's move area variables.
+	u16 px = (char.position.x + (s32(char.velocity.x) << 8)) >> 16
+
+	u16 leftBorder  = move_area.left.player2  + 16
+	u16 rightBorder = move_area.right.player2 + 320 - 24	// 296 = 0x128 (original Genesis width offset)
+
+	if (px < leftBorder)
+	{
+		char.position.x = u32(leftBorder) << 16
+		char.velocity.x = 0
+		char.groundspeed = 0
+	}
+#if STANDALONE
+	else if (Game.getSetting(SETTING_FIX_GLITCHES) && leftBorder <= 0x20 && s16(px) < s16(leftBorder) && s16(px) >= s16(leftBorder) - 0x80)
+	{
+		char.position.x = u32(leftBorder) << 16
+		char.velocity.x = 0
+		char.groundspeed = 0
+	}
+#endif
+	else if (px > rightBorder)
+	{
+		char.position.x = u32(rightBorder) << 16
+		char.velocity.x = 0
+		char.groundspeed = 0
+	}
+
+	// Y-border / bottomless pit check for P2
+	if (!global.passing_floor)
+	{
+		bool hitBottom
+		if (global.inv_gravity)
+		{
+			hitBottom = (s16(char.position.y.u16) <= s16(level.vertical_wrap))
+		}
+		else
+		{
+			// Use P2's bottom move area
+			s16 bottomLimit = s16(move_area.bottom.current.player2) + getScreenHeight()
+			hitBottom = (s16(char.position.y.u16) > bottomLimit)
+		}
+
+		if (hitBottom)
+		{
+			Character.Die()
+		}
+	}
+}
+
+
+// ============================================================
+//  coop.syncP2MoveArea
+//  Keep P2's move area variables in sync with P1's so the camera
+//  and borders track correctly as the level scrolls.
+//  Called each frame from coop.updateWorld().
+// ============================================================
+
+function void coop.syncP2MoveArea()
+{
+	move_area.left.player2            = move_area.left
+	move_area.right.player2           = move_area.right
+	move_area.bottom.current.player2  = move_area.bottom.current
+}
+
+
+// ============================================================
+//  coop.teleportLaggingPlayer
+//  If P2 has fallen behind the advancing left boundary (boss
+//  arenas, act transitions), snap it next to P1 with short
+//  invincibility so it arrives safely.
+// ============================================================
+
+function void coop.teleportLaggingPlayer()
+{
+	u16 p2x = u16[0xffffb04a + 0x10]		// P2 world X
+	u16 p1x = u16[0xffffb000 + 0x10]		// P1 world X
+
+	// Left boundary: objects cannot exist below this
+	u16 hardLeft = move_area.left + 16 - 0x20	// a little ahead of leftBorder
+
+	// Teleport if P2 is behind the hard left boundary or is more
+	// than COOP_TELEPORT_THRESHOLD pixels to the left of P1.
+	// Signed distance: player 2 may freely run ahead of player 1, only lagging far behind counts
+	bool behindBoundary = (s16(p2x) < s16(hardLeft))
+	bool tooFarBehind   = (s16(p1x - p2x) > s16(COOP_TELEPORT_THRESHOLD))
+
+	if (!behindBoundary && !tooFarBehind)
+	{
+		return
+	}
+
+	// Snap P2 beside P1 (slightly to the left to avoid overlap)
+	u16 newX = p1x - 0x20
+	if (s16(newX) < s16(hardLeft))
+	{
+		newX = hardLeft
+	}
+
+	u16[0xffffb04a + 0x10] = newX
+	u16[0xffffb04a + 0x14] = u16[0xffffb000 + 0x14]	// same Y as P1
+
+	// Brief invincibility so P2 doesn't immediately take damage
+	u8[0xffffb04a + 0x34] = COOP_TELEPORT_INVINCIBILITY		// char.invuln.countdown
+
+#if STANDALONE
+	debugLog("co-op: P2 teleported to leader (P1x=" + p1x + " P2x=" + p2x + ")")
+#endif
+}
+
+
+// ============================================================
+//  coop.updateWorld  â€”  per-frame world management hook
+//  Called once per game frame when coop.isActive() and in normal
+//  gameplay (not competition, not bonus stages).
+//
+//  Hook: override UpdateGameObjects() so our per-frame world
+//  tasks run without needing a new engine callback.
+// ============================================================
+
+function void UpdateGameObjects()
+{
+	base.UpdateGameObjects()
+
+	if (!coop.isActive() || competition_mode.active)
+	{
+		return
+	}
+
+	// Let player 2 enter as soon as the level starts; the player 2 object itself isn't necessarily updated
+	// right after intro cutscenes (e.g. Angel Island with Sonic & Tails), so this can't rely on it alone
+	if (coop.p2Waiting && global.game_mode == 0x0c)
+	{
+		u32 backupA0 = A0
+		A0 = 0xffffb04a
+		coop.updatePlayer2Waiting()
+		A0 = backupA0
+	}
+
+	// Skip bonus stages (stage_type == 2) and special stages (stage_type == 1)
+	// global.stage_type: 0 = normal level, 1 = special stage, 2 = bonus stage / HPZ giant ring
+	if (global.stage_type != 0)
+	{
+		return
+	}
+
+	// Keep P2 move area in sync each frame
+	coop.syncP2MoveArea()
+
+	// Teleport P2 if it has fallen behind the camera lock area
+	if (global.level_started != 0 && !coop.isPlayer2Waiting() && u8[0xffffb04a + 0x05] == base_state.NORMAL)
+	{
+		coop.teleportLaggingPlayer()
+	}
+}

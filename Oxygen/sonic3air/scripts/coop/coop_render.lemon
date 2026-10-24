@@ -1,0 +1,564 @@
+/*
+*	Sonic 3 & Knuckles Co-op Mod
+*	coop_render.lemon  —  split-screen rendering for co-op mode
+*
+*	Top/bottom split screen for normal levels:
+*	  - P1 (top 108 lines):    standard VRAM planes B/A, scroll sets 0/1
+*	  - P2 (bottom 112 lines): foreground from the engine's co-op plane A
+*	    (built each frame from the level layout around P2's camera, so it
+*	    is correct no matter how far apart the players are), scroll set 3;
+*	    background is a copy of P1's (VRAM plane B, scroll set 2)
+*
+*	The game camera is laid out for a 224-line screen with the character
+*	around line 0x60. Each half only shows ~110 lines, so every half gets
+*	a "view offset": the number of camera lines skipped at its top, chosen
+*	so the character stays inside its half.
+*
+*	Published under the GNU GPLv3 open source software license.
+*/
+
+
+// Character Y inside its half when the camera is in its default position
+constant u16 COOP_VIEW_TARGET_Y  = 0x3c
+// Minimum distance between character and the top/bottom edge of its half
+constant u16 COOP_VIEW_MARGIN    = 0x20
+
+global u16 coop.viewOffset.p1
+global u16 coop.viewOffset.p2
+
+
+// ============================================================
+//  UpdateCamera OVERRIDE
+//  In co-op mode (non-competition) we must update both cameras.
+// ============================================================
+
+function void UpdateCamera()
+{
+	// While player 2 waits for the level start (intro cutscenes), everything stays single-screen
+	if (!coop.isActive() || competition_mode.active || global.game_mode != 0x0c || coop.isPlayer2Waiting())
+	{
+		base.UpdateCamera()
+		return
+	}
+
+	if (u8[0xffffee30] != 0)
+	{
+		return
+	}
+
+	u16[0xffffee00] = 0
+	u16[0xffffee02] = 0
+	u16[0xffffee04] = 0
+	u16[0xffffee06] = 0
+
+	// ---- Player 1 (same as the non-competition single-player path) ----
+	if (player1.camera_lock == 0)
+	{
+		if (!camera.use_forced_target)
+		{
+			A0 = 0xffffb000
+		}
+		else
+		{
+			camera.use_forced_target = false
+			camera.locktime.player1 = 0
+			A0 = addressof(camera.forced_target.x) - 0x10
+		}
+
+		A1 = addressof(camera.position.x)			// 0xffffee78
+		A2 = addressof(move_area.left)				// 0xffffee14
+		A4 = 0xffffee00
+		A5 = addressof(camera.locktime.player1)		// 0xffffee24
+		A6 = 0xffffe500
+		UpdateCameraPositionX()
+
+		A1 = addressof(camera.position.y)			// 0xffffee7c
+		A4 = 0xffffee02
+		D3.u16 = isMainCharacter(CHARACTER_TAILS) ? camera.yoffset.tails : camera.yoffset.player
+		UpdateCameraPositionY()
+	}
+
+	// ---- Player 2 (mirrors competition_mode P2 block in camera.lemon) ----
+	// Outside competition mode the game uses player2.camera_lock for other purposes, so co-op has its own lock
+	if (global.level_started == 0)
+	{
+		camera.position.x.u16.player2 = camera.position.x.u16
+		camera.position.y.u16.player2 = camera.position.y.u16
+		coop.p2CameraLocked = false
+	}
+	else if (!coop.p2CameraLocked)
+	{
+		A0 = 0xffffb04a
+		A1 = addressof(camera.position.x.player2)	// 0xffffee60
+		A2 = addressof(move_area.left.player2)		// 0xffffee1c
+		A4 = 0xffffee04
+		A5 = addressof(camera.locktime.player2)		// 0xffffee28
+		A6 = 0xffffe400
+		UpdateCameraPositionX()		// The competition variant wraps around the level width, which normal levels don't
+
+		A1 = 0xffffee64							// camera.position.y.player2
+		A2 = addressof(move_area.left.player2)
+		A4 = 0xffffee06
+		D3.u16 = camera.yoffset.tails		// Player 2's look up/down offset, whatever the character
+		UpdateCameraPositionY()
+
+		camera.foreground.x.u16.player2 = camera.position.x.u16.player2
+		camera.foreground.y.u16.player2 = camera.position.y.u16.player2
+	}
+
+	UpdateCameraBoundsInLevel()
+}
+
+
+// ============================================================
+//  View offsets (camera lines hidden above each half)
+// ============================================================
+
+function u16 coop.computeViewOffset(u32 character, u16 cameraY, u16 viewHeight)
+{
+	s16 characterY = s16(u16[character + 0x14] - cameraY)
+	s16 offset = 0x60 - s16(COOP_VIEW_TARGET_Y)
+
+	s16 minOffset = characterY + s16(COOP_VIEW_MARGIN) - s16(viewHeight)
+	s16 maxOffset = characterY - s16(COOP_VIEW_MARGIN)
+	if (offset < minOffset)
+		offset = minOffset
+	if (offset > maxOffset)
+		offset = maxOffset
+
+	s16 maxPossible = s16(getScreenHeight()) - s16(viewHeight)
+	if (offset > maxPossible)
+		offset = maxPossible
+	if (offset < 0)
+		offset = 0
+	return u16(offset)
+}
+
+
+// ============================================================
+//  coop.setupSplitScreen
+//  Configures planes and scroll offsets of both halves.
+//
+//  Renderer.setupPlane source flags: bits 0-2 = plane (0=B, 1=A, 5=COOP_A), bit 4 = priority
+//  Scroll sets: 0 = P1 plane B, 1 = P1 plane A, 2 = P2 plane B, 3 = P2 plane A
+//  Plane shaders use the absolute screen line, so a half starting at line S
+//  that should show camera line (offset + n) at its n-th line needs a vertical
+//  scroll of (cameraY + offset - S).
+// ============================================================
+
+function void coop.setupSplitScreen()
+{
+#if STANDALONE
+	u16 screenW = getScreenWidth()
+	u16 splitStart = getScreenHeight() - COOP_VIEWPORT_HEIGHT_LOWER
+	u16 offset1 = coop.viewOffset.p1
+	u16 offset2 = coop.viewOffset.p2
+
+	Renderer.enableDefaultPlane(0, false)
+	Renderer.enableDefaultPlane(1, false)
+	Renderer.enableDefaultPlane(2, false)
+	Renderer.enableDefaultPlane(3, false)
+
+	// ---- Upper half: player 1, VRAM planes ----
+	Renderer.setupPlane(0, 0, screenW, COOP_VIEWPORT_HEIGHT_UPPER, 0x00, 0, 0x1000)
+	Renderer.setupPlane(0, 0, screenW, COOP_VIEWPORT_HEIGHT_UPPER, 0x01, 1, 0x2000)
+	Renderer.setupPlane(0, 0, screenW, COOP_VIEWPORT_HEIGHT_UPPER, 0x10, 0, 0x3000)
+	Renderer.setupPlane(0, 0, screenW, COOP_VIEWPORT_HEIGHT_UPPER, 0x11, 1, 0x4000)
+
+	// Horizontal scroll per line, taken from the game's H-scroll buffer (plane A word, then plane B word; values are negated)
+	for (u16 line = 0; line < COOP_VIEWPORT_HEIGHT_UPPER; ++line)
+	{
+		u32 entry = 0xffffe000 + u32(line + offset1) * 4
+		Renderer.setScrollOffsetH(1, line, 0 - u16[entry])
+		Renderer.setScrollOffsetH(0, line, 0 - u16[entry + 2])
+	}
+
+	u16 p1ForegroundV = camera.foreground.y.u16 + offset1
+	u16 p1BackgroundV = camera.background.y.u16 + offset1
+	for (u8 column = 0; column < 0x20; ++column)
+	{
+		Renderer.setScrollOffsetV(1, column, p1ForegroundV)
+		Renderer.setScrollOffsetV(0, column, p1BackgroundV)
+	}
+
+	// ---- Lower half: player 2 ----
+	u16 p2CamX = camera.position.x.u16.player2
+	u16 p2CamY = camera.position.y.u16.player2
+
+	// Foreground: built by the engine from the level layout around P2's camera
+	Renderer.fillCoopPlane(COOP_PLANE_A, p2CamX, p2CamY)
+	Renderer.setupPlane(0, splitStart, screenW, COOP_VIEWPORT_HEIGHT_LOWER, 0x05, 3, 0x2000)
+	Renderer.setupPlane(0, splitStart, screenW, COOP_VIEWPORT_HEIGHT_LOWER, 0x15, 3, 0x4000)
+
+	// Background: same picture as P1's background
+	Renderer.setupPlane(0, splitStart, screenW, COOP_VIEWPORT_HEIGHT_LOWER, 0x00, 2, 0x1000)
+	Renderer.setupPlane(0, splitStart, screenW, COOP_VIEWPORT_HEIGHT_LOWER, 0x10, 2, 0x3000)
+
+	for (u16 lowerLine = 0; lowerLine < COOP_VIEWPORT_HEIGHT_LOWER; ++lowerLine)
+	{
+		u16 sourceLine = lowerLine + offset1
+		if (sourceLine >= getScreenHeight())
+			sourceLine = getScreenHeight() - 1
+		u32 lowerEntry = 0xffffe000 + u32(sourceLine) * 4
+		Renderer.setScrollOffsetH(3, splitStart + lowerLine, p2CamX)
+		Renderer.setScrollOffsetH(2, splitStart + lowerLine, 0 - u16[lowerEntry + 2])
+	}
+
+	u16 p2ForegroundV = p2CamY + offset2 - splitStart
+	u16 p2BackgroundV = p1BackgroundV - splitStart
+	for (u8 lowerColumn = 0; lowerColumn < 0x20; ++lowerColumn)
+	{
+		Renderer.setScrollOffsetV(3, lowerColumn, p2ForegroundV)
+		Renderer.setScrollOffsetV(2, lowerColumn, p2BackgroundV)
+	}
+#endif
+}
+
+
+// ============================================================
+//  Object rendering for one half
+//  Same as renderNextCompModeObject (rendering.lemon), plus the
+//  Standalone.onWriteToSpriteTable hook that the normal renderer
+//  uses: without it characters are drawn as raw VDP sprites, which
+//  share VRAM tiles between both players and use the wrong palette.
+// ============================================================
+
+global u8 coop.renderingHalf = 0xff		// 0 = upper, 1 = lower, 0xff = not in co-op object rendering
+
+function u16 Standalone.getCharacterRenderQueue(u16 spritePriority)
+{
+	if (coop.renderingHalf == 0xff)
+		return base.Standalone.getCharacterRenderQueue(spritePriority)
+
+	// Upper half objects use queues 0x9800..0x9bff, lower half 0x9c00..0x9fff (see viewports in RenderSprites_CoopMode)
+	return 0x9bff + u16(coop.renderingHalf) * 0x400 - spritePriority / 2
+}
+
+function void coop.renderNextObject(u8 splitScreenIndex)
+{
+	u16 renderQueue = 0x9800 + u16(splitScreenIndex) * 0x400
+
+	u32 objAddress = 0xffff0000 + u16[A4]
+	A0 = objAddress
+	A4 += 2
+
+	if (splitScreenIndex == 0)
+	{
+		objA0.render_flags &= ~render_flag.VISIBLE
+	}
+	D6.u8 = objA0.render_flags
+
+	u16 offsetY = (splitScreenIndex == 0) ? 0 : (getScreenHeight() - COOP_VIEWPORT_HEIGHT_LOWER)
+	u16 viewportHeight = (splitScreenIndex == 0) ? COOP_VIEWPORT_HEIGHT_UPPER : COOP_VIEWPORT_HEIGHT_LOWER
+
+	D0.u16 = objA0.position.x.u16
+	D1.u16 = objA0.position.y.u16
+
+	if (objA0.render_flags & render_flag.COMPOUND)
+	{
+		D0.u16 = (D0.u16 - u16[A3] + objA0.box_size.x) & level.width.bitmask
+		D2.u16 = getScreenWidth() + objA0.box_size.x * 2
+		if (D0.u16 >= D2.u16)
+			return
+		D0.u16 += 0x80 - objA0.box_size.x
+
+		D1.u16 = (D1.u16 - u16[A3 + 0x04] + objA0.box_size.y) & level.height.bitmask
+		D2.u16 = viewportHeight + objA0.box_size.y * 2
+		if (D1.u16 >= D2.u16)
+			return
+		D1.u16 += 0x80 - objA0.box_size.y
+
+		objA0.render_flags |= render_flag.VISIBLE
+
+	#if STANDALONE
+		if (Standalone.shouldUseFrameInterpolation(objAddress))
+			Renderer.setSpriteTagWithPosition(A0, D0.u16 - 0x80, D1.u16 + offsetY - 0x80)
+		else
+			Renderer.clearSpriteTag()
+		if (Standalone.onWriteToSpriteTable(D0.u16 - 0x80, D1.u16 + offsetY - 0x80, renderQueue))
+			return
+	#endif
+		D1.u16 += offsetY
+
+		D5.u16 = objA0.sprite_attributes
+		A2 = objA0.mapping_offset
+		D4 = objA0.animation.sprite
+		if (D4.u8 != 0)
+		{
+			A1 = tableLookupAddress(A2, D4.u16 * 2)
+			D4.s16 = s16[A1] - 1
+			A1 += 2
+			if (D4.s16 >= 0)
+			{
+				u16 backup = D6.u16
+				writeToSpriteTableCompound(renderQueue)
+				D6.u16 = backup
+			}
+		}
+
+		D3.u16 = objA0.compound.count - 1
+		if (D3.s16 >= 0)
+		{
+			A0 += 0x18
+			while (D3.s16 >= 0)
+			{
+				D0.u16 = (u16[A0]   - u16[A3]   + 0x80) & level.width.bitmask
+				D1.u16 = (u16[A0+2] - u16[A3+4] + 0x80) & level.height.bitmask
+				D1.u16 += offsetY
+
+				D4 = u8[A0 + 5]
+				A0 += 6
+
+				A1 = tableLookupAddress(A2, D4.u16 * 2)
+				D4.u16 = u16[A1] - 1
+				A1 += 2
+				if (D4.s16 >= 0)
+				{
+					u16 backupD6 = D6.u16
+					writeToSpriteTableCompound(renderQueue)
+					D6.u16 = backupD6
+				}
+				--D3.s16
+			}
+		}
+		return
+	}
+
+	if (objA0.render_flags & render_flag.WORLD)
+	{
+		D0.u16 = (D0.u16 - u16[A3] + objA0.box_size.x) & level.width.bitmask
+		D2.u16 = getScreenWidth() + objA0.box_size.x * 2
+		if (D0.u16 >= D2.u16)
+			return
+		D0.u16 += 0x80 - objA0.box_size.x
+
+		D1.u16 = (D1.u16 - u16[A3 + 0x04] + objA0.box_size.y) & level.height.bitmask
+		D2.u16 = viewportHeight + objA0.box_size.y * 2
+		if (D1.u16 >= D2.u16)
+			return
+		D1.u16 += 0x80 - objA0.box_size.y
+	}
+	D1.u16 += offsetY
+
+	objA0.render_flags |= render_flag.VISIBLE
+
+#if STANDALONE
+	if (Standalone.shouldUseFrameInterpolation(objAddress))
+		Renderer.setSpriteTagWithPosition(A0, D0.u16 - 0x80, D1.u16 - 0x80)
+	else
+		Renderer.clearSpriteTag()
+	if (Standalone.onWriteToSpriteTable(D0.u16 - 0x80, D1.u16 - 0x80, renderQueue))
+		return
+#endif
+
+	A1 = objA0.mapping_offset
+	D4 = 0
+	if ((objA0.render_flags & render_flag.STATIC_MAPPING) == 0)
+	{
+		A1 = tableLookupAddress(A1, u16(objA0.animation.sprite) * 2)
+		D4.u16 = u16[A1] - 1
+		A1 += 2
+	}
+
+	if (D4.s16 >= 0)
+	{
+		D5.u16 = objA0.sprite_attributes
+		writeToSpriteTable(renderQueue)
+	}
+}
+
+
+// ============================================================
+//  Static level rings for one half
+//  Same as RenderStaticRings (static_rings.lemon), but relative to
+//  that half's camera (A3) and clipped to its viewport height.
+//  Only rings in the window the game keeps around player 1 exist.
+// ============================================================
+
+function void coop.renderStaticRings(u8 splitScreenIndex)
+{
+#if STANDALONE
+	u32 numRings = (rings.around.last - rings.around.first) / 4
+	if (numRings == 0)
+		return
+
+	u16 renderQueue = 0x9800 + u16(splitScreenIndex) * 0x400
+	u16 offsetY = (splitScreenIndex == 0) ? 0 : (getScreenHeight() - COOP_VIEWPORT_HEIGHT_LOWER)
+	u16 viewportHeight = (splitScreenIndex == 0) ? COOP_VIEWPORT_HEIGHT_UPPER : COOP_VIEWPORT_HEIGHT_LOWER
+	u16 cameraX = u16[A3]
+	u16 cameraY = u16[A3 + 4]
+
+	u32 ringAddress = rings.around.first
+	u32 stateAddress = 0xffff0000 + rings.around.first.state
+	while (numRings > 0)
+	{
+		u16 ringAnimationState = u16[stateAddress]
+		if (ringAnimationState != 0xffff)
+		{
+			u16 relativeY = (u16[ringAddress + 2] - cameraY + 8) & level.height.bitmask
+			if (relativeY < viewportHeight + 16)
+			{
+				s16 px = s16(u16[ringAddress] - cameraX)
+				s16 py = s16(relativeY) - 8 + s16(offsetY)
+				if (px > -16 && px < s16(getScreenWidth()) + 16)
+				{
+					u8 animFrame = ringAnimationState & 0xff
+					if (animFrame == 0)
+					{
+						// Rotating ring
+						animFrame = ((static_rings.animframe * 8 + 7 - static_rings.animtimer) / 4) % 8
+						u64 key = stringformat("ring_0%d", animFrame)
+						Renderer.drawCustomSprite(key, px, py, 0x00, 0, renderQueue)
+					}
+					else
+					{
+						// Sparkle after collecting
+						u32 src = 0x00ebee + animFrame * 8
+						Renderer.drawVdpSprite(px + s16(u16[src + 6]), py + s16(u16[src + 0]), u8[src + 3], u16[src + 4], renderQueue)
+					}
+				}
+			}
+		}
+		stateAddress += 2
+		ringAddress += 4
+		--numRings
+	}
+#endif
+}
+
+
+// ============================================================
+//  RenderSprites OVERRIDE
+// ============================================================
+
+function void RenderSprites()
+{
+	// Only in-level (game mode 0x0c); menus like Data Select keep the normal renderer
+	if (coop.isActive() && !competition_mode.active && global.game_mode == 0x0c && !coop.isPlayer2Waiting())
+	{
+		RenderSprites_CoopMode()
+		return
+	}
+
+	// Data Select (game mode 0x4c) also renders once per frame through here
+	if (coop.isActive() && global.game_mode == 0x4c)
+	{
+		coop.updateDataSelect()
+	}
+	base.RenderSprites()
+}
+
+
+// ============================================================
+//  RenderSprites_CoopMode
+//  Mirrors RenderSprites_CompetitionMode (rendering.lemon). Sprites are
+//  placed relative to the camera at A3 / A3+4, so the camera Y is shifted
+//  by the half's view offset while that half is drawn, then restored.
+// ============================================================
+
+function void RenderSprites_CoopMode()
+{
+	coop.viewOffset.p1 = coop.computeViewOffset(0xffffb000, camera.foreground.y.u16, COOP_VIEWPORT_HEIGHT_UPPER)
+	coop.viewOffset.p2 = coop.computeViewOffset(0xffffb04a, camera.position.y.u16.player2, COOP_VIEWPORT_HEIGHT_LOWER)
+
+#if STANDALONE
+	Renderer.resetSprites()
+
+	// Viewports for sprite clipping (render queue ranges)
+	Renderer.setViewport(0, 0, getScreenWidth(), COOP_VIEWPORT_HEIGHT_UPPER, 0x97ff)
+	Renderer.setViewport(0, getScreenHeight() - COOP_VIEWPORT_HEIGHT_LOWER, getScreenWidth(), COOP_VIEWPORT_HEIGHT_LOWER, 0x9bff)
+	Renderer.resetViewport(0xa000)
+
+	coop.setupSplitScreen()
+#endif
+
+	// ---- Upper half: Player 1 ----
+	u16 savedCameraY = camera.foreground.y.u16
+	camera.foreground.y.u16 += coop.viewOffset.p1
+	coop.renderingHalf = 0
+
+	D7 = 0x4d
+	D6 = 0
+	A5 = 0xffffac00
+	A3 = 0xffffee80		// camera.foreground.x (P1)
+	A6 = (u16[0xffffef3c] != 0) ? 0xffff7890 : 0xfffff810
+
+	if (global.level_started != 0)
+	{
+		// HUD is shared (score, time, rings and lives are common to both players), drawn once in screen space
+	#if STANDALONE
+		Renderer.setSpriteTagWithPosition(1, 0, 0)
+		Renderer.setLogicalSpriteSpace(Space.SCREEN)
+	#endif
+		RenderHUD()
+	#if STANDALONE
+		Renderer.clearSpriteTag()
+		Renderer.setLogicalSpriteSpace(Space.WORLD)
+	#endif
+
+		coop.renderStaticRings(0)
+	}
+
+	while (A5 < 0xffffb000)
+	{
+		u8[A5] = u8[A5 + 0x01]
+		A4 = A5 + 2
+		while (u8[A5] != 0)
+		{
+			coop.renderNextObject(0)
+			u8[A5] -= 2
+		}
+		A5 += 0x80
+	}
+
+	while (D7.s16 >= 0)
+	{
+		u16[A6] = 0
+		A6 += 8
+		--D7.s16
+	}
+
+	camera.foreground.y.u16 = savedCameraY
+
+	if (u32[0xffffad02] == 0xb000b04a)
+	{
+		u32[0xffffad02] = 0xb04ab000
+	}
+
+	// ---- Lower half: Player 2 ----
+	savedCameraY = camera.position.y.u16.player2
+	camera.position.y.u16.player2 += coop.viewOffset.p2
+	coop.renderingHalf = 1
+
+	D7 = 0x4f
+	A5 = 0xffffac00
+	A3 = 0xffffee60		// camera.position.x.player2
+	A6 = (u16[0xffffef3c] != 0) ? 0xffff7d80 : 0xffff7b00
+
+	if (global.level_started != 0)
+	{
+		coop.renderStaticRings(1)
+	}
+
+	while (A5 < 0xffffb000)
+	{
+		A4 = A5 + 2
+		while (u8[A5 + 0x01] != 0)
+		{
+			coop.renderNextObject(1)
+			u8[A5 + 0x01] -= 2
+		}
+		A5 += 0x80
+	}
+
+	while (D7.s16 >= 0)
+	{
+		u16[A6] = 0
+		A6 += 8
+		--D7.s16
+	}
+
+	camera.position.y.u16.player2 = savedCameraY
+	coop.renderingHalf = 0xff
+	u8[0xffffef3e] = 0xff
+}

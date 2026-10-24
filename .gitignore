@@ -108,3 +108,7 @@ framework/external/sdl/SDL2/Xcode/SDL/build/SDL.build
 # ROM â€” nunca commitar
 Oxygen/sonic3air/Sonic_Knuckles_wSonic3.bin
 Oxygen/sonic3air/*.bin
+
+# Pacote de distribuição e instalador gerados
+/dist/
+/installer/output/

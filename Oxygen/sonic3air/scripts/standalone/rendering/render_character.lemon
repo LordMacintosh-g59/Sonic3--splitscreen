@@ -76,6 +76,12 @@ function void Standalone.drawCharacterSpriteDirect(u8 character, s16 px, s16 py,
 }
 
 
+// Split-screen modes override this to keep characters inside their half's render queue range
+function u16 Standalone.getCharacterRenderQueue(u16 spritePriority)
+{
+	return 0xa000 - spritePriority
+}
+
 function bool Standalone.drawCharacterSprite(u8 character, u8 variant, s16 px, s16 py, bool asSmallGhost)
 {
 	bool isPlayer1 = (variant == 0)
@@ -319,7 +325,7 @@ function bool Standalone.drawCharacterSprite(u8 character, u8 variant, s16 px, s
 		}
 	}
 
-	u16 renderQueue = 0xa000 - char.sprite_priority
+	u16 renderQueue = Standalone.getCharacterRenderQueue(char.sprite_priority)
 	u8 atex = (char.sprite_attributes >> 9) & 0x30
 	if (EXTENDED_CHARACTER_PALETTES)
 		atex = 0x40 + character * 0x20

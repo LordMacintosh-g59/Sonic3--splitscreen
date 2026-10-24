@@ -175,12 +175,16 @@ void OpenGLRenderResources::refresh()
 
 	// Update plane pattern textures (0-3: standard planes; 4-5: co-op planes filled by scripts)
 	{
-		const int numPatterns = planeManager.getPlayfieldSizeInPatterns().x * planeManager.getPlayfieldSizeInPatterns().y;
+		const int numStandardPatterns = planeManager.getPlayfieldSizeInPatterns().x * planeManager.getPlayfieldSizeInPatterns().y;
 		for (int index = 0; index < PlaneManager::PLANE_COUNT; ++index)
 		{
 			// Standard planes: skip if not used; co-op planes always upload (scripts fill them each frame)
-			if (index < PlaneManager::PLANE_COOP_B && !planeManager.isPlaneUsed(index))
+			const bool isCoopPlane = (index >= PlaneManager::PLANE_COOP_B);
+			if (!isCoopPlane && !planeManager.isPlaneUsed(index))
 				continue;
+
+			// Co-op planes always have the fixed 64x32 layout the plane shader expects for them
+			const int numPatterns = isCoopPlane ? (64 * 32) : numStandardPatterns;
 
 			const uint16* buffer = planeManager.getPlanePatternsBuffer((uint8)index);
 			const bool hasChanged = (memcmp(mPlanePatternsData[index], buffer, numPatterns * 2) != 0);

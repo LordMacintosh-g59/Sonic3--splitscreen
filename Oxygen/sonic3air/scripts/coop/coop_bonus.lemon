@@ -1,0 +1,327 @@
+/*
+*	Sonic 3 & Knuckles Co-op Mod
+*	coop_bonus.lemon  —  bonus stages (Etapa 8)
+*
+*	Scope:
+*	  GLOWING SPHERES (GS)
+*	    - The level exits only after BOTH players have been carried
+*	      out through the top of the energy beam.
+*	    - Both P1 and P2 are already detected in fn049f5c / fn049fe4;
+*	      we simply defer the global.stage_type = 0 trigger.
+*
+*	  GUMBALL MACHINE (GM)
+*	    - No override: GM exits when P1 is done (existing behaviour).
+*	      P2 participates in collecting gumballs independently but the
+*	      level return is P1-driven.
+*	    KNOWN LIMITATION: both players exiting GM simultaneously is not
+*	    enforced. Acceptable for Etapa 8 scope.
+*
+*	  SLOT MACHINE (SM)
+*	    - A companion P2 ball object is spawned alongside P1's when
+*	      the SM starts.  The P2 ball uses P2's pad input (via a brief
+*	      control.player1 swap — the SM physics reads control.player1).
+*	    - fn04b97c and fn04bbf4 are overridden to use P2's character
+*	      slot and P2's camera when A0 is the P2 ball object.
+*	    - fn04bc54 is overridden to wait for both balls to finish before
+*	      triggering the level exit.
+*	    KNOWN LIMITATION: the P2 ball renders using P1's VRAM sprite
+*	    bank (Char.Player1.targetInVRAM) since P1 always loads that bank.
+*	    Visual appearance of P2 in the SM is therefore P1's character.
+*	    Full dual-VRAM-bank loading is deferred to a future iteration.
+*
+*	Published under the GNU GPLv3 open source software license.
+*/
+
+
+// ============================================================
+//  MARKER stored in slot-machine ball objects.
+//  Offset 0x4c (u8): 0 = P1 ball, 1 = P2 ball.
+//  All other SM object offsets used end at 0x48 (STANDALONE).
+// ============================================================
+constant u32 SM_BALL_PLAYER_FLAG = 0x4c
+
+
+// ============================================================
+//  GS ENERGY BEAM INIT OVERRIDE  (fn049f20)
+//  Reset the per-stage exit flags as a fresh bonus visit starts.
+// ============================================================
+
+function void fn049f20()
+{
+	base.fn049f20()
+	if (coop.isActive())
+	{
+		coop.bonus.p1exited = false
+		coop.bonus.p2exited = false
+	}
+}
+
+
+// ============================================================
+//  GS EXIT OVERRIDE  (fn049fe4)
+//  Called per frame for each player while the energy beam rises.
+//  Original: exits the stage the same frame P1 clears the top.
+//  Co-op:    track each player; exit when both have cleared.
+// ============================================================
+
+function void fn049fe4()
+{
+	if (!coop.isActive())
+	{
+		base.fn049fe4()
+		return
+	}
+
+	D0.u16 = objA1.position.y.u16
+	if (D0.s16 < -0x20)
+	{
+		// This character has cleared the top of the beam
+		if (A1 == 0xffffb000)
+		{
+			coop.bonus.p1exited = true
+		#if STANDALONE
+			Game.setAchievementComplete(ACHIEVEMENT_GS_EXIT_TOP)
+		#endif
+		}
+		else
+		{
+			coop.bonus.p2exited = true
+		}
+	}
+	else
+	{
+		// Character is still in the beam — same as original: snap to beam Y if close
+		D0.u16 = D0.u16 - objA0.position.y.u16 + 0x0c
+		if (D0.u16 >= 0x18 || debug_mode.state != 0)
+		{
+			return
+		}
+
+		objA1.position.y.u16 = objA0.position.y.u16
+		if (u8[A1 + 0x2e] == 0)
+		{
+			playSound(0x8a)
+		}
+	}
+
+	// Lock controls while in / above the beam
+	u8[A1 + 0x2e] = (control_flag.DISABLE_INTERACTION | control_flag.DISABLE_UPDATE)
+	u8[A1 + 0x2a] |= char.flag.IN_AIR
+
+	// Only the P1 branch drives the exit; run it every frame for P1
+	if (A1 == 0xffffb000)
+	{
+		objA0.subtype2c = 1
+		if (coop.bonus.p1exited && coop.bonus.p2exited)
+		{
+			// Both players cleared — return to normal level
+			global.zone_act              = checkpoint.zone_act
+			global.zone_act.apparent     = checkpoint.zone_act.apparent
+			checkpoint.number            = checkpoint.number.backup
+			global.stage_type            = 0
+			level.restart.u8             = 1
+			checkpoint.rings             = ring_counter
+			checkpoint.lives_granted     = extra_lives_granted
+			global.shields_backup_1      = u8[0xffffb000 + 0x2b] & char.bonus.ALL_SHIELDS
+		}
+	}
+}
+
+
+// ============================================================
+//  SM INIT OVERRIDE  (fn04b9ce — base_state 0x00)
+//  After the P1 ball initialises, spawn a P2 companion ball
+//  and reset the per-stage exit flags.
+// ============================================================
+
+function void fn04b9ce()
+{
+	base.fn04b9ce()
+
+	if (!coop.isActive())
+	{
+		return
+	}
+
+	// Reset exit flags for this SM visit
+	coop.bonus.p1exited = false
+	coop.bonus.p2exited = false
+
+	// Spawn the P2 ball as a dynamic object
+	if (allocDynamicObjectStd())
+	{
+		// Update function: reuse fn04b958 (SM ball update); input swap happens in fn04ba4e override
+		objA1.update_address = 0x04b958
+
+		// Mark as P2 ball
+		u8[A1 + SM_BALL_PLAYER_FLAG] = 1
+
+		// Same starting position as P1 (both drop into the tube together)
+		objA1.position.x = objA0.position.x
+		objA1.position.y = objA0.position.y
+
+		// Skip the init state — go straight to rolling (P1 init already ran)
+		objA1.base_state = 0x02
+
+		// Copy physical dimensions from P1 ball
+		objA1.hitbox_extends.x = objA0.hitbox_extends.x
+		objA1.hitbox_extends.y = objA0.hitbox_extends.y
+
+		// Set P2 character type for animation selection (char.character = u8[A0+0x38])
+		D0.u16 = u16(min(u16(coop.character.p2), 2))
+		objA1.flags38 = D0.u8
+		objA1.mapping_offset = u32[0x04b9c2 + D0.s16 * 4]
+
+		// Use P1's VRAM bank (see header note about known limitation)
+		objA1.sprite_attributes = (Char.Player1.targetInVRAM >> 5)
+		objA1.render_flags      = render_flag.WORLD
+		objA1.sprite_priority   = 0x0100
+		objA1.state             = char.state.ROLLING
+		objA1.flags2a          |= (char.flag.ROLLING | char.flag.IN_AIR)
+	}
+}
+
+
+// ============================================================
+//  SM RENDER OVERRIDE  (fn04b97c)
+//  Original hardcodes A1 = 0xffffb000 for sprite patterns.
+//  Co-op: when A0 is the P2 ball, use A1 = 0xffffb04a instead.
+// ============================================================
+
+function void fn04b97c()
+{
+	if (!coop.isActive() || u8[A0 + SM_BALL_PLAYER_FLAG] == 0)
+	{
+		base.fn04b97c()
+		return
+	}
+
+	// P2 ball: same render sequence but with P2's character slot
+	objA0.state = char.state.ROLLING
+	fn04b99e()			// animation update — reads char.character = u8[A0+0x38] = P2 type
+
+	A1 = 0xffffb04a
+	D0 = objA1.animation.sprite
+	SetCharacterSpritePatterns()
+
+	fn04bbf4()			// camera update — overridden below to write P2 camera
+	DrawObject()
+}
+
+
+// ============================================================
+//  SM CAMERA OVERRIDE  (fn04bbf4)
+//  Original writes camera.position.x/y.u16 (P1 camera).
+//  Co-op: when A0 is the P2 ball, write the P2 camera coords.
+// ============================================================
+
+function void fn04bbf4()
+{
+	if (!coop.isActive() || u8[A0 + SM_BALL_PLAYER_FLAG] == 0)
+	{
+		base.fn04bbf4()
+		return
+	}
+
+	// P2 ball: centre P2's viewport on this ball
+	D3.u16 = objA0.position.x.u16 - getScreenWidth() / 2
+	if (D3.s16 >= 0)
+	{
+		u16[0xffffee60] = D3.u16		// camera.position.x.u16.player2
+	}
+
+	D2.u16 = objA0.position.y.u16 - getScreenHeight() / 2
+	if (D2.s16 >= 0)
+	{
+		u16[0xffffee64] = D2.u16		// camera.position.y.u16.player2
+	}
+}
+
+
+// ============================================================
+//  SM FADEOUT/EXIT OVERRIDE  (fn04bc54)
+//  Original triggers global.stage_type = 0 as soon as the
+//  fadeout countdown (60 frames) reaches 0.
+//  Co-op:
+//    P2 ball — spins and waits; marks coop.bonus.p2exited once
+//              its countdown hits 0, then becomes INACTIVE.
+//    P1 ball — freezes at countdown = 1 until P2 is done, then
+//              lets the base call fire the level exit normally.
+// ============================================================
+
+function void fn04bc54()
+{
+	if (!coop.isActive())
+	{
+		base.fn04bc54()
+		return
+	}
+
+	if (u8[A0 + SM_BALL_PLAYER_FLAG] == 1)
+	{
+		// ---- P2 ball ----
+		// Spin and fade without calling FadeOutPalette (P1 owns that).
+		u16[0xffffe402] += 0x40
+		slotmachine.rotation.full += u16[0xffffe402]
+
+		--slotmachine.fadeout.countdown
+		if (slotmachine.fadeout.countdown == 0)
+		{
+			coop.bonus.p2exited = true
+			u8[A0 + 0x05] = base_state.INACTIVE	// stop updating this object
+		}
+
+		fn04b97c()		// overridden: renders P2 ball correctly
+		return
+	}
+
+	// ---- P1 ball ----
+	if (!coop.bonus.p2exited)
+	{
+		// P2 not done yet — hold at countdown = 1 so we keep spinning
+		if (slotmachine.fadeout.countdown <= 1)
+		{
+			slotmachine.fadeout.countdown = 1
+		}
+
+		// Continue palette fade and rotation animation
+		--global.fadeout_countdown
+		if (s16(global.fadeout_countdown) < 0)
+		{
+			global.fadeout_countdown = 0x02
+			u32 backupA0 = A0
+			FadeOutPalette()
+			A0 = backupA0
+		}
+		u16[0xffffe402] += 0x40
+		slotmachine.rotation.full += u16[0xffffe402]
+		fn04b97c()		// render P1 ball normally
+		return
+	}
+
+	// Both balls done — hand off to the base call to set global.stage_type = 0
+	base.fn04bc54()
+}
+
+
+// ============================================================
+//  SM ROLLING STATE OVERRIDE  (fn04ba4e)
+//  Called every frame while base_state == 0x02 (ball rolling).
+//  Co-op: when A0 is the P2 ball, temporarily redirect
+//  control.player1 to pad2 so the SM physics use P2's input.
+//  All input reads inside fn04ba4e go through control.player1.
+// ============================================================
+
+//# address-hook(0x04ba4e)
+function void fn04ba4e()
+{
+	if (coop.isActive() && u8[A0 + SM_BALL_PLAYER_FLAG] != 0)
+	{
+		u32 savedPlayer1 = control.player1
+		control.player1 = control.pad2
+		base.fn04ba4e()
+		control.player1 = savedPlayer1
+		return
+	}
+	base.fn04ba4e()
+}

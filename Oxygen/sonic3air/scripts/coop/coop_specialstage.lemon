@@ -1,0 +1,95 @@
+/*
+*	Sonic 3 & Knuckles Co-op Mod
+*	coop_specialstage.lemon  —  Blue Spheres Special Stage (Etapa 9)
+*
+*	ARCHITECTURE SUMMARY
+*	  The Blue Spheres stage is a monolithic "pull" simulation:
+*	    - All world state (grid position, direction, speed) lives in shared
+*	      global RAM: bluespheres.position.x/y (0xffffe422/24),
+*	      bluespheres.direction (0xffffe426), bluespheres.movement_speed
+*	      (0xffffe428), etc.
+*	    - The SpecialStage() while-loop (fn0081c6) drives everything per frame.
+*	    - P2/Tails is a *visual follower* object; its fn00927a update reads the
+*	      same world state as P1 and draws Tails a few steps behind in 3D.
+*	    - Sphere-at-position checks (fn009402) read P1's grid coordinates.
+*	      There is no independent P2 sphere grid in the original engine.
+*
+*	CO-OP CHANGES (this file)
+*	  1. fn00937c override: P2 uses pad2 directly and immediately, without
+*	     the delay-buffer / "follow P1" fallback of the original.
+*	     Effect: P2 can steer Tails' running direction independently and
+*	     choose when to jump/side-step blue spheres that P1 may have missed.
+*
+*	  2. fn009212 override: reset per-BS-visit elimination flags so a new
+*	     Special Stage visit starts with both players active.
+*
+*	LIMITATIONS (deferred to future work)
+*	  - No split viewport: both players share the same 3D camera (P1's).
+*	    To get two independent viewports each player would need their own
+*	    copy of the entire bluespheres.* state block, and SpecialStage()
+*	    would need to run the simulation twice per frame — a ~400-line
+*	    rewrite of the monolithic loop.
+*	  - Sphere collision for P2 uses P1's grid coordinates (fn009402 only
+*	    reads bluespheres.position.x/y). True independent sphere collection
+*	    requires the state-swap architecture above.
+*	  - Red sphere elimination (fn00972e) is P1-only. When P1 hits a red
+*	    sphere the stage exits immediately for both players (original
+*	    behaviour preserved). A separate P2 elimination path would only
+*	    be useful once P2 has an independent grid position.
+*	  - P2 (Tails) renders using SpecialStage.Tails.targetInVRAM which
+*	    always shows Tails' sprite regardless of coop.character.p2. The BS
+*	    stage only loads P1 character + Tails VRAM patterns on init.
+*
+*	Published under the GNU GPLv3 open source software license.
+*/
+
+
+// ============================================================
+//  BS VISIT INIT OVERRIDE  (fn009212)
+//  Called when the P2 Tails object is set up at BS stage start.
+//  Reset per-visit elimination flags before base init runs.
+// ============================================================
+
+//# address-hook(0x009212)
+function void fn009212()
+{
+	if (coop.isActive())
+	{
+		coop.bs.p1.eliminated = false
+		coop.bs.p2.eliminated = false
+	}
+	base.fn009212()
+}
+
+
+// ============================================================
+//  P2 INPUT OVERRIDE  (fn00937c)
+//  Called by fn00927a (Tails update) every frame to obtain the
+//  input for P2's movement.
+//
+//  Original logic:
+//    - Maintains a ring buffer of P1's past inputs.
+//    - If pad2 has any directional/button input, sets
+//      tails.control_counter = 600 and returns pad2 state.
+//    - Otherwise replays P1's buffered commands (Tails follows
+//      P1's exact path with a small delay).
+//
+//  Co-op override:
+//    - Always return pad2 directly. No buffer, no follow-P1.
+//    - P2 immediately controls Tails' direction and jumps.
+//    - D0.u16 receives control.pad2; fn00927a uses D0 as the
+//      input word for turn/jump decisions.
+// ============================================================
+
+//# address-hook(0x00937c)
+function void fn00937c()
+{
+	if (!coop.isActive())
+	{
+		base.fn00937c()
+		return
+	}
+
+	// P2 always drives Tails directly — no delay, no P1 path replay
+	D0.u16 = control.pad2
+}

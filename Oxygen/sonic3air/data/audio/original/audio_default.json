@@ -353,6 +353,8 @@
 	"peelout_charge":  { "File": "scd_peelout_charge.ogg", "Type": "Sound", "Channel": "AB" },		// Use spindash channel
 	"peelout_release": { "File": "scd_peelout_release.ogg", "Type": "Sound", "Channel": "AB" },		// Use spindash channel
 
-	"shc_splash": { "File": "shc_splash.ogg", "Type": "Sound" }
+	"shc_splash": { "File": "shc_splash.ogg", "Type": "Sound" },
+
+	"coop_intro": { "Name": "Co-op Intro", "File": "coop_intro.ogg", "Type": "Jingle" }
 
 }

@@ -1,0 +1,391 @@
+/*
+*	Sonic 3 & Knuckles Co-op Mod
+*	coop_items.lemon  —  shared items, individual death, checkpoints
+*
+*	Etapa 6 scope:
+*	  - Monitor effects (shields, invincibility, speed up, extra rings) are
+*	    applied to BOTH players when any player breaks a monitor.
+*	  - P2 breaking a ring monitor no longer triggers a Robotnik hit on
+*	    the ring-1-up threshold; shared lives are incremented instead.
+*	  - Character death is handled per-player: the dying player respawns
+*	    at the last checkpoint (P1) or beside their partner (P2) without
+*	    restarting the whole level, unless lives reach 0 (game over).
+*	  - Either player can activate a starpost checkpoint.
+*
+*	Published under the GNU GPLv3 open source software license.
+*/
+
+
+// ============================================================
+//  CONSTANTS
+// ============================================================
+
+// Object-slot addresses for shield objects (permanent slots in memory)
+constant u32 SHIELD_OBJ_P1 = 0xffffcce8
+constant u32 SHIELD_OBJ_P2 = 0xffffcd32
+
+// Object-slot addresses for invincibility star effects
+constant u32 INVINC_OBJ_P1 = 0xffffcd7c
+constant u32 INVINC_OBJ_P2 = 0xffffcea4
+
+// Invincibility frames given to a respawned player (~3 seconds at 60fps)
+constant u16 COOP_RESPAWN_INVINCIBILITY = 180
+
+
+// ============================================================
+//  HELPER: return the OTHER player's slot address
+// ============================================================
+
+function u32 coop.otherSlot()
+{
+	// A1 is set by the caller to the breaking character's slot
+	return (A1 == 0xffffb000) ? u32(0xffffb04a) : u32(0xffffb000)
+}
+
+
+// ============================================================
+//  ItemEffect.ApplyExtraRings OVERRIDE
+//  Fix: in competition mode, P2 breaking a ring monitor and
+//  hitting the 1-up threshold gives P2 a Robotnik hit.
+//  In co-op, both players share lives, so always give a life.
+// ============================================================
+
+function void ItemEffect.ApplyExtraRings()
+{
+	if (!coop.isActive())
+	{
+		base.ItemEffect.ApplyExtraRings()
+		return
+	}
+
+	++u16[A2]
+
+	ring_counter = min(ring_counter + 10, 999)
+	player.total_rings = min(player.total_rings + 10, 999)
+	hud.dirty.rings |= 0x01
+
+	if (checkForExtraLifeByRings())
+	{
+		// Shared life counter: always give the extra life, regardless of
+		// which player broke the monitor.
+		++player.item_count
+		gainExtraLife()
+	}
+	else
+	{
+		playMusic(SFX_RING)
+	}
+}
+
+
+// ============================================================
+//  SHIELD OVERRIDES  —  apply to both players in co-op
+//  The base call handles the breaking player + SFX.
+//  We then copy the shield status to the other player directly.
+// ============================================================
+
+function void ItemEffect.ApplyShieldFire()
+{
+	base.ItemEffect.ApplyShieldFire()
+	if (!coop.isActive())
+	{
+		return
+	}
+
+	u32 other = coop.otherSlot()
+	u8[other + 0x2b] &= ~char.bonus.ALL_SHIELDS
+	u8[other + 0x2b] |= (char.bonus.ANY_SHIELD | char.bonus.SHIELD_FIRE)
+	u32 shieldObj = (other == 0xffffb000) ? SHIELD_OBJ_P1 : SHIELD_OBJ_P2
+	u32[shieldObj] = addressof(FireShield.Init)
+	u16[shieldObj + 0x42] = u16(other)
+}
+
+
+function void ItemEffect.ApplyShieldLightning()
+{
+	base.ItemEffect.ApplyShieldLightning()
+	if (!coop.isActive())
+	{
+		return
+	}
+
+	u32 other = coop.otherSlot()
+	u8[other + 0x2b] &= ~char.bonus.ALL_SHIELDS
+	u8[other + 0x2b] |= (char.bonus.ANY_SHIELD | char.bonus.SHIELD_LIGHTNING)
+	u32 shieldObj = (other == 0xffffb000) ? SHIELD_OBJ_P1 : SHIELD_OBJ_P2
+	u32[shieldObj] = addressof(LightningShield.Init)
+	u16[shieldObj + 0x42] = u16(other)
+}
+
+
+function void ItemEffect.ApplyShieldBubble()
+{
+	base.ItemEffect.ApplyShieldBubble()
+	if (!coop.isActive())
+	{
+		return
+	}
+
+	u32 other = coop.otherSlot()
+	u8[other + 0x2b] &= ~char.bonus.ALL_SHIELDS
+	u8[other + 0x2b] |= (char.bonus.ANY_SHIELD | char.bonus.SHIELD_BUBBLE)
+	u32 shieldObj = (other == 0xffffb000) ? SHIELD_OBJ_P1 : SHIELD_OBJ_P2
+	u32[shieldObj] = addressof(BubbleShield.Init)
+	u16[shieldObj + 0x42] = u16(other)
+}
+
+
+// ============================================================
+//  ItemEffect.ApplyInvincibility OVERRIDE
+//  Apply invincibility stars and bonus flag to both players.
+// ============================================================
+
+function void ItemEffect.ApplyInvincibility()
+{
+	base.ItemEffect.ApplyInvincibility()
+	if (!coop.isActive())
+	{
+		return
+	}
+
+	// Only spread if the base already granted invincibility (super check inside base)
+	if (super.active != 0 || super.active.tails != 0)
+	{
+		return
+	}
+
+	u32 other = coop.otherSlot()
+
+	u8[other + 0x2b] |= char.bonus.INVINCIBLE
+	u8[other + 0x35] = 150		// char.invinc.countdown
+
+	// Spawn invincibility stars for the other player
+	u32 invincObj = (other == 0xffffb000) ? INVINC_OBJ_P1 : INVINC_OBJ_P2
+	u32[invincObj] = addressof(Invincibility.Init)
+	u16[invincObj + 0x42] = u16(other)
+}
+
+
+// ============================================================
+//  ItemEffect.ApplySpeedUp OVERRIDE
+//  Set speed bonus flag on both players.
+//  Speed cap properties (global.move.speedcap.*) are already
+//  handled per-slot by the base call; we only propagate the
+//  countdown flag to the other player.
+// ============================================================
+
+function void ItemEffect.ApplySpeedUp()
+{
+	base.ItemEffect.ApplySpeedUp()
+	if (!coop.isActive())
+	{
+		return
+	}
+
+	u32 other = coop.otherSlot()
+	u8[other + 0x2b] |= char.bonus.SPEED_UP
+	u8[other + 0x36] = 150		// char.speedup.countdown
+}
+
+
+// ============================================================
+//  coop.respawnPlayer
+//  Restores a player to the living state after co-op death,
+//  then drops them in from above the screen.
+//
+//  Drop-in behaviour per character (player-controlled, no AI):
+//    Sonic   — free-falls; player can jump/spin-dash during descent.
+//    Tails   — placed with fly_countdown active; player steers the
+//              flutter down by holding jump.
+//    Knuckles— falls; player can press jump mid-air to glide in.
+//
+//  A0 must be the dying player's slot address on entry.
+// ============================================================
+
+// Invincibility long enough to cover the fall + a few safe seconds
+constant u8 COOP_DROPIN_INVINCIBILITY = 240	// 4 s at 60fps (char.invuln.countdown is a byte)
+
+function void coop.respawnPlayer()
+{
+	// Release camera lock
+	if (A0 == 0xffffb000)
+	{
+		player1.camera_lock = 0
+	}
+	else
+		coop.p2CameraLocked = false
+
+	char.base_state = base_state.NORMAL
+	char.control_flags = 0
+	char.state = char.state.STANDING
+	char.velocity.x = 0
+	char.velocity.y = 0
+	char.groundspeed = 0
+	char.flags = char.flag.IN_AIR
+	char.hlock_countdown = 0
+	char.spindash_charge = 0
+	char.speedup.countdown = 0
+	char.double_jump_state = 0
+
+	// Rings are shared; scatter already happened on death; reset counter
+	ring_counter = 0
+
+	// Restore sprite attributes from checkpoint (establishes layer context)
+	char.sprite_attributes = checkpoint.sprite_attr
+	char.layer_flags = checkpoint.layer_flags
+
+	// --- Target horizontal position ---
+	u16 targetX
+	if (A0 == 0xffffb04a)
+	{
+		targetX = u16[0xffffb000 + 0x10] + 0x20	// P2 spawns just right of P1
+	}
+	else
+		targetX = checkpoint.x					// P1 spawns at last starpost
+
+	char.position.x.u16 = targetX
+
+	// --- Drop-in: one full screen above the player's camera viewport ---
+	// The world-Y one screen above the viewport top so the character
+	// is invisible until gravity brings them down into the frame.
+	u16 camY = (A0 == 0xffffb000) ? camera.position.y.u16 : u16[0xffffee64]
+	char.position.y.u16 = camY - 0xe0			// 224 px above viewport centre
+
+	// --- Character-specific drop-in setup ---
+	if (char.character == CHARACTER_TAILS)
+	{
+		// Start Tails in flight state so the player can use the fly
+		// mechanic to control descent. double_jump_state = 1 activates flutter.
+		char.double_jump_state = 1
+	}
+	// Sonic: nothing extra — gravity does the work.
+	// Knuckles: nothing extra — player presses jump mid-air to glide.
+
+	// --- Extended invincibility covers the entire drop-in ---
+	char.invuln.countdown = COOP_DROPIN_INVINCIBILITY
+}
+
+
+// ============================================================
+//  Character.CheckDiedStateEnd OVERRIDE
+//  In co-op: decrement shared lives and respawn the dying
+//  player individually (no full level restart).  Game over
+//  when lives reach 0.  Falls through to base for non-co-op.
+// ============================================================
+
+function void Character.CheckDiedStateEnd()
+{
+	if (!coop.isActive())
+	{
+		base.Character.CheckDiedStateEnd()
+		return
+	}
+
+	char.spindash = 0
+	if (A0 == 0xffffb000)
+	{
+		player1.camera_lock = 1
+	}
+	else
+		coop.p2CameraLocked = true
+
+	// Wait until the character has fallen past the bottom (or risen past the
+	// top in reverse-gravity) of their camera viewport before processing death.
+	u16 camY = (A0 == 0xffffb000) ? camera.position.y.u16 : u16[0xffffee64]
+	if (global.inv_gravity)
+	{
+		if (s16(char.position.y.u16) > s16(camY - 0x10))
+		{
+			return
+		}
+	}
+	else
+	{
+		if (s16(char.position.y.u16) <= s16(camY + 0x100))
+		{
+			return
+		}
+	}
+
+	// ---- Process death ----------------------------------------
+
+	char.spindash_charge = 0
+	global.in_extra_stage = 0
+
+#if STANDALONE
+	if (!Game.getSetting(SETTING_INFINITE_LIVES))
+#endif
+	{
+		if (lives_counter > 0)
+			--lives_counter
+	}
+	++hud.dirty.lives
+
+	bool lostGame = false
+	if (lives_counter == 0)
+	{
+		u8[0xffffb094 + 0x22] = 0
+		u8[0xffffb0de + 0x22] = 1
+		global.time_over = 0	// game over takes precedence over time over
+		lostGame = true
+	}
+	else if (global.time_over)
+	{
+		u8[0xffffb094 + 0x22] = 2
+		u8[0xffffb0de + 0x22] = 3
+		lostGame = true
+	}
+
+	if (lostGame)
+	{
+		// Leave the died state for good (like the base game), otherwise this runs again every frame
+		char.base_state = base_state.INACTIVE
+		char.spindash_charge = 0
+	#if GAMEAPP
+		Game.setUnderwaterAudioEffect(0)
+	#endif
+		// Spawn time/game-over display objects (same as base)
+		u32[0xffffb094] = 0x02d5c6
+		u32[0xffffb0de] = 0x02d5c6
+		u16[0xffffb094 + 0x3e] = A0.u16
+		hud.dirty.timer = 0
+		hud.dirty.timer.player2 = 0
+		playMusic(MUSIC_GAMEOVER)
+		fillPatternLoadingCues(0x03)
+		return
+	}
+
+	// Respawn the dying player without restarting the level
+	coop.respawnPlayer()
+}
+
+
+// ============================================================
+//  fn02d012 OVERRIDE  (Checkpoint per-frame update)
+//  Allow P2 to activate a starpost, not only P1.
+//  Base uses A3 = 0xffffb000 (P1) for the proximity test.
+//  In co-op we run the same test a second time for P2.
+// ============================================================
+
+function void fn02d012()
+{
+	if (debug_mode.state == 0)
+	{
+		// Original P1 check
+		A3 = 0xffffb000
+		D1.u8 = checkpoint.number
+		fn02d028()
+
+		// Co-op P2 check — only if the checkpoint wasn't just activated
+		// by P1 (fn02d028 sets objA0.base_state = 0x04 when activated,
+		// which causes fn02d012 to no longer be the update routine).
+		if (coop.isActive())
+		{
+			A3 = 0xffffb04a
+			D1.u8 = checkpoint.number
+			fn02d028()
+		}
+	}
+
+	fn02d0f8()
+}
