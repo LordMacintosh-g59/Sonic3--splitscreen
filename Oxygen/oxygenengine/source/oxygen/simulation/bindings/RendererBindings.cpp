@@ -427,6 +427,11 @@ namespace
 		RenderParts::instance().getPaletteManager().writePaletteEntryPacked(1, index, color);
 	}
 
+	void Renderer_setSecondaryPaletteColor(uint16 index, uint32 color)
+	{
+		RenderParts::instance().getPaletteManager().writePaletteEntry(1, index, color);
+	}
+
 	void Renderer_setScrollOffsetH(uint8 setIndex, uint16 lineNumber, uint16 value)
 	{
 		RenderParts::instance().getScrollOffsetsManager().overwriteScrollOffsetH(setIndex, lineNumber, value);
@@ -1225,6 +1230,9 @@ void RendererBindings::registerBindings(lemon::Module& module)
 			.setParameters("line");
 
 		builder.addNativeFunction("Renderer.setSecondaryPaletteColorPacked", lemon::wrap(&Renderer_setSecondaryPaletteColorPacked), defaultFlags)
+			.setParameters("index", "color");
+
+		builder.addNativeFunction("Renderer.setSecondaryPaletteColor", lemon::wrap(&Renderer_setSecondaryPaletteColor), defaultFlags)
 			.setParameters("index", "color");
 
 		builder.addNativeFunction("Renderer.setScrollOffsetH", lemon::wrap(&Renderer_setScrollOffsetH), defaultFlags)

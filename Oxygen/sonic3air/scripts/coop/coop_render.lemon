@@ -433,6 +433,15 @@ function void coop.renderStaticRings(u8 splitScreenIndex)
 
 function void RenderSprites()
 {
+#if GAMEAPP
+	// Special stage has its own split screen (see coop_specialstage.lemon)
+	if (coop.bs.isSplit())
+	{
+		coop.bs.renderSprites()
+		return
+	}
+#endif
+
 	// Only in-level (game mode 0x0c); menus like Data Select keep the normal renderer
 	if (coop.isActive() && !competition_mode.active && global.game_mode == 0x0c && !coop.isPlayer2Waiting())
 	{

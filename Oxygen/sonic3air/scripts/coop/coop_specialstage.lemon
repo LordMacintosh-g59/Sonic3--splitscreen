@@ -1,95 +1,945 @@
 /*
 *	Sonic 3 & Knuckles Co-op Mod
-*	coop_specialstage.lemon  —  Blue Spheres Special Stage (Etapa 9)
+*	coop_specialstage.lemon  —  Blue Spheres Special Stage in co-op
 *
-*	ARCHITECTURE SUMMARY
-*	  The Blue Spheres stage is a monolithic "pull" simulation:
-*	    - All world state (grid position, direction, speed) lives in shared
-*	      global RAM: bluespheres.position.x/y (0xffffe422/24),
-*	      bluespheres.direction (0xffffe426), bluespheres.movement_speed
-*	      (0xffffe428), etc.
-*	    - The SpecialStage() while-loop (fn0081c6) drives everything per frame.
-*	    - P2/Tails is a *visual follower* object; its fn00927a update reads the
-*	      same world state as P1 and draws Tails a few steps behind in 3D.
-*	    - Sphere-at-position checks (fn009402) read P1's grid coordinates.
-*	      There is no independent P2 sphere grid in the original engine.
+*	Both players run on the same sphere planet, each with an own
+*	position, direction, speed and jump, shown in a top/bottom split
+*	screen (player 1 on top, player 2 below):
+*	  - The sphere layout and the blue sphere counter are shared, so
+*	    spheres collected by either player count for both
+*	  - A player touching a red sphere is out and waits; the other one
+*	    can still get the Chaos Emerald for both
+*	  - When both players are out, the stage ends without an emerald
 *
-*	CO-OP CHANGES (this file)
-*	  1. fn00937c override: P2 uses pad2 directly and immediately, without
-*	     the delay-buffer / "follow P1" fallback of the original.
-*	     Effect: P2 can steer Tails' running direction independently and
-*	     choose when to jump/side-step blue spheres that P1 may have missed.
+*	The original stage only knows one runner: all of its movement state
+*	is in global RAM (bluespheres.*). Player 2's copy of that state is
+*	kept in script globals and swapped in whenever player 2 gets updated
+*	or rendered (see coop.bs.useState).
 *
-*	  2. fn009212 override: reset per-BS-visit elimination flags so a new
-*	     Special Stage visit starts with both players active.
-*
-*	LIMITATIONS (deferred to future work)
-*	  - No split viewport: both players share the same 3D camera (P1's).
-*	    To get two independent viewports each player would need their own
-*	    copy of the entire bluespheres.* state block, and SpecialStage()
-*	    would need to run the simulation twice per frame — a ~400-line
-*	    rewrite of the monolithic loop.
-*	  - Sphere collision for P2 uses P1's grid coordinates (fn009402 only
-*	    reads bluespheres.position.x/y). True independent sphere collection
-*	    requires the state-swap architecture above.
-*	  - Red sphere elimination (fn00972e) is P1-only. When P1 hits a red
-*	    sphere the stage exits immediately for both players (original
-*	    behaviour preserved). A separate P2 elimination path would only
-*	    be useful once P2 has an independent grid position.
-*	  - P2 (Tails) renders using SpecialStage.Tails.targetInVRAM which
-*	    always shows Tails' sprite regardless of coop.character.p2. The BS
-*	    stage only loads P1 character + Tails VRAM patterns on init.
+*	Each half shows a band of the original 224 lines high view, starting
+*	at line COOP_BS_VIEW_TOP. The checkerboard colors depend on the
+*	runner's position, so the lower half uses the engine's secondary
+*	palette (the one normally used below the water surface).
 *
 *	Published under the GNU GPLv3 open source software license.
 */
 
 
-// ============================================================
-//  BS VISIT INIT OVERRIDE  (fn009212)
-//  Called when the P2 Tails object is set up at BS stage start.
-//  Reset per-visit elimination flags before base init runs.
-// ============================================================
+constant u16 COOP_BS_HALF_HEIGHT = 112		// Lines per half
+constant u16 COOP_BS_VIEW_TOP    = 58		// First line of the original view shown in each half (so the character's feet are at the bottom)
 
-//# address-hook(0x009212)
-function void fn009212()
+// Render queue bands: everything of the upper half is drawn in [0x1001, 0x4fff], lower half in [0x5001, 0x8fff], shared parts from 0x9000 on
+constant u16 COOP_BS_QUEUE_UPPER  = 0x1000
+constant u16 COOP_BS_QUEUE_LOWER  = 0x5000
+constant u16 COOP_BS_QUEUE_SHARED = 0x9000
+
+
+global bool coop.bs.inStage = false		// Set while SpecialStage() runs in co-op
+global u8 coop.bs.activePlayer = 0		// Whose movement state is currently in bluespheres.*
+global u8 coop.bs.renderHalf = 0xff		// Half the spheres get rendered for, 0xff outside of that
+
+// Movement state of the player that is not active right now
+global u16 coop.bs.other.positionX
+global u16 coop.bs.other.positionY
+global u8  coop.bs.other.direction
+global u16 coop.bs.other.movementSpeed
+global u8  coop.bs.other.nextDirection
+global u8  coop.bs.other.hittingBumper
+global u8  coop.bs.other.turning
+global u8  coop.bs.other.goingForward
+global u8  coop.bs.other.jumpingFlags
+global u16 coop.bs.other.positionXFormer
+global u16 coop.bs.other.positionYFormer
+global u16 coop.bs.other.objectStandingOn
+global u8  coop.bs.other.startedRunning
+global u16 coop.bs.other.floorFrame
+global u8  coop.bs.other.paletteFrame
+global u16 coop.bs.other.scrollB
+
+
+function bool coop.bs.isSplit()
 {
-	if (coop.isActive())
-	{
-		coop.bs.p1.eliminated = false
-		coop.bs.p2.eliminated = false
-	}
-	base.fn009212()
+	return coop.bs.inStage && coop.isActive() && bluespheres.minigame_mode == 0
+}
+
+function bool coop.bs.isEliminated(u8 player)
+{
+	return (player == 0) ? coop.bs.p1.eliminated : coop.bs.p2.eliminated
 }
 
 
 // ============================================================
-//  P2 INPUT OVERRIDE  (fn00937c)
-//  Called by fn00927a (Tails update) every frame to obtain the
-//  input for P2's movement.
-//
-//  Original logic:
-//    - Maintains a ring buffer of P1's past inputs.
-//    - If pad2 has any directional/button input, sets
-//      tails.control_counter = 600 and returns pad2 state.
-//    - Otherwise replays P1's buffered commands (Tails follows
-//      P1's exact path with a small delay).
-//
-//  Co-op override:
-//    - Always return pad2 directly. No buffer, no follow-P1.
-//    - P2 immediately controls Tails' direction and jumps.
-//    - D0.u16 receives control.pad2; fn00927a uses D0 as the
-//      input word for turn/jump decisions.
+//  Movement state swapping
 // ============================================================
 
-//# address-hook(0x00937c)
-function void fn00937c()
+function void coop.bs.swapState()
 {
-	if (!coop.isActive())
+	u16 value16
+	u8 value8
+
+	value16 = bluespheres.position.x
+	bluespheres.position.x = coop.bs.other.positionX
+	coop.bs.other.positionX = value16
+
+	value16 = bluespheres.position.y
+	bluespheres.position.y = coop.bs.other.positionY
+	coop.bs.other.positionY = value16
+
+	value8 = bluespheres.direction
+	bluespheres.direction = coop.bs.other.direction
+	coop.bs.other.direction = value8
+
+	value16 = u16(bluespheres.movement_speed)
+	bluespheres.movement_speed = s16(coop.bs.other.movementSpeed)
+	coop.bs.other.movementSpeed = value16
+
+	value8 = u8(bluespheres.next_direction)
+	bluespheres.next_direction = s8(coop.bs.other.nextDirection)
+	coop.bs.other.nextDirection = value8
+
+	value8 = bluespheres.hitting_bumper
+	bluespheres.hitting_bumper = coop.bs.other.hittingBumper
+	coop.bs.other.hittingBumper = value8
+
+	value8 = bluespheres.turning
+	bluespheres.turning = coop.bs.other.turning
+	coop.bs.other.turning = value8
+
+	value8 = bluespheres.going_forward
+	bluespheres.going_forward = coop.bs.other.goingForward
+	coop.bs.other.goingForward = value8
+
+	value8 = bluespheres.jumping_flags.player1
+	bluespheres.jumping_flags.player1 = coop.bs.other.jumpingFlags
+	coop.bs.other.jumpingFlags = value8
+
+	value16 = bluespheres.position.x.former
+	bluespheres.position.x.former = coop.bs.other.positionXFormer
+	coop.bs.other.positionXFormer = value16
+
+	value16 = bluespheres.position.y.former
+	bluespheres.position.y.former = coop.bs.other.positionYFormer
+	coop.bs.other.positionYFormer = value16
+
+	value16 = bluespheres.object_standing_on
+	bluespheres.object_standing_on = coop.bs.other.objectStandingOn
+	coop.bs.other.objectStandingOn = value16
+
+	value8 = bluespheres.started_running
+	bluespheres.started_running = coop.bs.other.startedRunning
+	coop.bs.other.startedRunning = value8
+
+	value16 = bluespheres.floor.frame
+	bluespheres.floor.frame = coop.bs.other.floorFrame
+	coop.bs.other.floorFrame = value16
+
+	value8 = bluespheres.palette.frame
+	bluespheres.palette.frame = coop.bs.other.paletteFrame
+	coop.bs.other.paletteFrame = value8
+
+	value16 = scrolloffset.y.planeB
+	scrolloffset.y.planeB = coop.bs.other.scrollB
+	coop.bs.other.scrollB = value16
+
+	coop.bs.activePlayer ^= 1
+}
+
+function void coop.bs.useState(u8 player)
+{
+	if (coop.bs.activePlayer != player)
 	{
-		base.fn00937c()
+		coop.bs.swapState()
+	}
+}
+
+// Both players start with the same state, i.e. at the same spot
+function void coop.bs.copyActiveStateToOther()
+{
+	coop.bs.other.positionX = bluespheres.position.x
+	coop.bs.other.positionY = bluespheres.position.y
+	coop.bs.other.direction = bluespheres.direction
+	coop.bs.other.movementSpeed = u16(bluespheres.movement_speed)
+	coop.bs.other.nextDirection = u8(bluespheres.next_direction)
+	coop.bs.other.hittingBumper = bluespheres.hitting_bumper
+	coop.bs.other.turning = bluespheres.turning
+	coop.bs.other.goingForward = bluespheres.going_forward
+	coop.bs.other.jumpingFlags = bluespheres.jumping_flags.player1
+	coop.bs.other.positionXFormer = bluespheres.position.x.former
+	coop.bs.other.positionYFormer = bluespheres.position.y.former
+	coop.bs.other.objectStandingOn = bluespheres.object_standing_on
+	coop.bs.other.startedRunning = bluespheres.started_running
+	coop.bs.other.floorFrame = bluespheres.floor.frame
+	coop.bs.other.paletteFrame = bluespheres.palette.frame
+	coop.bs.other.scrollB = scrolloffset.y.planeB
+}
+
+
+// ============================================================
+//  Stage start / end
+// ============================================================
+
+function void SpecialStage()
+{
+	coop.bs.inStage = coop.isActive()
+	coop.bs.activePlayer = 0
+	coop.bs.renderHalf = 0xff
+	coop.bs.p1.eliminated = false
+	coop.bs.p2.eliminated = false
+
+	base.SpecialStage()
+
+	coop.bs.useState(0)
+	coop.bs.inStage = false
+}
+
+
+// ============================================================
+//  Player 1 update (0x00903e)
+//  Out players stand still; the shared speed-up timer keeps running.
+// ============================================================
+
+function void fn00903e()
+{
+	if (!coop.bs.isSplit())
+	{
+		base.fn00903e()
 		return
 	}
 
-	// P2 always drives Tails directly — no delay, no P1 path replay
-	D0.u16 = control.pad2
+	coop.bs.useState(0)
+	if (!coop.bs.p1.eliminated)
+	{
+		base.fn00903e()
+		return
+	}
+
+	if (bluespheres.speedup_countdown != 0)
+	{
+		--bluespheres.speedup_countdown
+		if (bluespheres.speedup_countdown == 0)
+		{
+			bluespheres.speedup_countdown = BlueSpheres.useGeneratedStages() ? 2700 : 1800
+			if (bluespheres.current_gamespeed < 0x2000)
+			{
+				bluespheres.current_gamespeed += 0x400
+				changeMusicTempo(0x48 - (bluespheres.current_gamespeed >> 8) * 2)
+			}
+		}
+	}
+	DrawObject()
 }
+
+
+// ============================================================
+//  Player 2 init (0x009212) and update (0x00927a)
+//  Player 2 is a full runner like player 1 instead of the original
+//  Tails that follows player 1's path.
+// ============================================================
+
+function void fn009212()
+{
+	if (!coop.bs.isSplit())
+	{
+		base.fn009212()
+		return
+	}
+
+	coop.bs.copyActiveStateToOther()
+
+	objA0.render_flags = render_flag.WORLD
+	objA0.box_size.x = 0x10
+	objA0.box_size.y = 0x10
+	objA0.sprite_priority = 0x0200
+
+	// Only the mapping matters, the character sprites are drawn from ROM data (see Standalone.onWriteToSpriteTable)
+	u8 character = getSecondCharacter()
+	if (character == CHARACTER_TAILS)
+	{
+		objA0.mapping_offset = 0x2908ba
+		objA0.sprite_attributes = (sprite_attribute.PRIORITY | sprite_attribute.PALETTE.LINE1 | (SpecialStage.Tails.targetInVRAM >> 5))
+		if (BlueSpheres.allocDynamicObjectAfterA0())
+		{
+			// Spawn Tails' tails object
+			objA1.update_address = 0x009444
+			u16[A1 + 0x3e] = A0.u16
+		}
+	}
+	else
+	{
+		objA0.mapping_offset = (character == CHARACTER_KNUCKLES) ? 0x0ad302 : 0x0abdfc
+		objA0.sprite_attributes = (sprite_attribute.PRIORITY | (SpecialStage.Player.targetInVRAM >> 5))
+	}
+
+	// Same screen position as player 1, as each one is in the middle of their own half
+	u16[A0 + 0x30] = 0xa0
+	objA0.value32 = 0x70
+	u16[A0 + 0x34] = 0
+	u16[A0 + 0x36] = -0x800
+	u16[A0 + 0x38] = 0
+	objA0.value3a = 0xff
+
+	objA0.update_address = 0x00927a
+	fn00927a()
+}
+
+function void fn00927a()
+{
+	if (!coop.bs.isSplit())
+	{
+		base.fn00927a()
+		return
+	}
+
+	if (coop.bs.p2.eliminated)
+	{
+		DrawObject()
+		return
+	}
+
+	// Same as player 1's update (minus the shared speed-up timer), with controller 2 in place of controller 1
+	coop.bs.useState(1)
+	u16 savedPad1 = control.pad1
+	control.pad1 = control.pad2
+
+	fn009580()
+
+	D0 = 0x0c
+	if (bluespheres.movement_speed != 0)
+	{
+		u16[A0 + 0x24] += bluespheres.movement_speed >> 5
+		D0 = objA0.animation.timer
+		if (D0.s8 < 0)
+		{
+			D0.u8 += 0x0c
+		}
+		else if (D0.u8 >= 0x0c)
+		{
+			D0.u8 -= 0x0c
+		}
+	}
+	objA0.animation.timer = D0.u8
+
+	if (bluespheres.jumping_flags.player1 & 0x80)
+	{
+		A1 = 0x0091f6
+		if (bluespheres.movement_speed == 0)
+		{
+			D0.u16 = level.framecounter.low & 0x03
+		}
+	}
+	else
+	{
+		A1 = 0x0091e8
+	}
+	objA0.animation.sprite = u8[A1 + D0.s16]
+
+	if ((bluespheres.jumping_flags.player1 & 0x80) == 0 && bluespheres.stage_exit_state == 0 && (control.pad1.pressed & CONTROL_ABC))
+	{
+		bluespheres.jumping_flags.player1 = 1
+	}
+
+	if ((bluespheres.direction & 0x3f) == 0)
+	{
+		if (bluespheres.jumping_flags.player1 == 1)
+		{
+			u32[A0 + 0x40] = 0xfff00000
+			bluespheres.jumping_flags.player1 = 0x80
+			bluespheres.next_direction = 0
+			playSound(SFX_JUMP)
+		}
+
+		if (bluespheres.jumping_flags.player1 & 0x80)
+		{
+			D0 = u32[A0 + 0x3c] + u32[A0 + 0x40]
+			if (D0.s32 >= 0)
+			{
+				D0 = 0
+				u32[A0 + 0x40] = 0
+				bluespheres.jumping_flags.player1 = 0
+			}
+
+			u32[A0 + 0x40] += bluespheres.current_gamespeed << 4
+			u32[A0 + 0x3c] = D0
+			D0 = (D0 << 16) + (D0 >> 16)
+			D0.u16 -= 0x800
+			u16[A0 + 0x36] = D0.u16
+		}
+	}
+
+	fn00950c()
+	fn00953e()
+	DrawObject()
+
+	control.pad1 = savedPad1
+	coop.bs.useState(0)
+}
+
+
+// ============================================================
+//  "Get Blue Spheres" text (0x008e94)
+//  When it's done, a player who did not press up yet starts running
+//  anyway - in co-op that has to happen for both players.
+// ============================================================
+
+function void fn008e94()
+{
+	u32 previousUpdateAddress = objA0.update_address
+	base.fn008e94()
+
+	if (coop.bs.isSplit() && objA0.update_address != previousUpdateAddress)
+	{
+		coop.bs.useState(1)
+		if (bluespheres.movement_speed == 0)
+		{
+			bluespheres.going_forward = 1
+			bluespheres.started_running = 1
+		}
+		coop.bs.useState(0)
+	}
+}
+
+
+// ============================================================
+//  Red spheres (0x00972e)
+//  Only the player who ran into it is out, unless the other one is
+//  out already, then it's the usual game over.
+// ============================================================
+
+function void fn00972e()
+{
+	if (coop.bs.isSplit() && bluespheres.stage_exit_animation == 0)
+	{
+		u16 cell = ((((bluespheres.position.y + 0x80) >> 8) & 0x1f) << 5) | (((bluespheres.position.x + 0x80) >> 8) & 0x1f)
+		bool onGridPoint = ((bluespheres.position.x | bluespheres.position.y) & 0xe0) == 0
+		if (u8[0xfffff100 + cell] == 1 && onGridPoint && !coop.bs.isEliminated(coop.bs.activePlayer ^ 1))
+		{
+			if (coop.bs.activePlayer == 0)
+				coop.bs.p1.eliminated = true
+			else
+				coop.bs.p2.eliminated = true
+
+			bluespheres.movement_speed = 0
+			bluespheres.position.x = (bluespheres.position.x + 0x80) & 0xff00
+			bluespheres.position.y = (bluespheres.position.y + 0x80) & 0xff00
+			playSound(0x6a)
+			return
+		}
+	}
+
+	base.fn00972e()
+}
+
+
+// ============================================================
+//  Collected blue spheres turn red once their collector moved on
+//  The animation slots (0xffffa400) check the runner's position, so
+//  each slot remembers who collected it (in its unused byte 1).
+// ============================================================
+
+function void fn009dca()
+{
+	base.fn009dca()
+	if (coop.bs.isSplit() && _equal())
+	{
+		u8[A2 + 1] = coop.bs.activePlayer
+	}
+}
+
+function void fn009e34()
+{
+	if (!coop.bs.isSplit())
+	{
+		base.fn009e34()
+		return
+	}
+
+	u8 previousPlayer = coop.bs.activePlayer
+	coop.bs.useState(u8[A0 + 1] & 0x01)
+	base.fn009e34()
+	coop.bs.useState(previousPlayer)
+}
+
+
+// ============================================================
+//  All blue spheres collected (0x009b62)
+//  The emerald appears in front of a player who is still in, and
+//  either player can grab it.
+// ============================================================
+
+function void fn009b62()
+{
+	if (!coop.bs.isSplit())
+	{
+		base.fn009b62()
+		return
+	}
+
+	u8 leader = coop.bs.p1.eliminated ? 1 : 0
+	u8 previousExitState = bluespheres.stage_exit_state
+
+	coop.bs.useState(leader)
+	base.fn009b62()
+
+	if (previousExitState == 1 && bluespheres.stage_exit_state == 2)
+	{
+		// The emerald position is stored in object_standing_on, which is part of the per-player state
+		coop.bs.other.objectStandingOn = bluespheres.object_standing_on
+	}
+
+	if (bluespheres.stage_exit_state == 3 && !coop.bs.isEliminated(leader ^ 1))
+	{
+		coop.bs.useState(leader ^ 1)
+		base.fn009b62()
+	}
+
+	coop.bs.useState(0)
+}
+
+
+// ============================================================
+//  Background scrolling (0x009d5e), once per player
+// ============================================================
+
+function void fn009d5e()
+{
+	if (!coop.bs.isSplit())
+	{
+		base.fn009d5e()
+		return
+	}
+
+	coop.bs.useState(1)
+	base.fn009d5e()
+	coop.bs.useState(0)
+	base.fn009d5e()
+}
+
+
+#if GAMEAPP
+
+// ============================================================
+//  Split screen rendering
+// ============================================================
+
+function s16 coop.bs.offsetY(u8 half)
+{
+	return s16(u16(half) * (getScreenHeight() - COOP_BS_HALF_HEIGHT)) - s16(COOP_BS_VIEW_TOP)
+}
+
+// Maps an original render queue value into the band of the given half
+function u16 coop.bs.renderQueue(u8 half, u16 originalQueue)
+{
+	u16 band = (half == 0) ? COOP_BS_QUEUE_UPPER : COOP_BS_QUEUE_LOWER
+	return band + 1 + min(originalQueue / 4, 0x3ffe)
+}
+
+// 0 = upper half (player 1), 1 = lower half (player 2), 2 = shared (HUD, texts)
+function u8 coop.bs.getObjectHalf(u32 address)
+{
+	if (address == 0xffffb000)
+		return 0
+	if (address == 0xffffb04a)
+		return 1
+
+	// Tails' tails belong to their Tails
+	u32 updateAddress = u32[address]
+	if (updateAddress == 0x009444 || updateAddress == 0x009488)
+		return (u16[address + 0x3e] == 0xb04a) ? 1 : 0
+
+	return 2
+}
+
+function void coop.bs.setupPlanes()
+{
+	u16 screenWidth = getScreenWidth()
+	u16 lowerStart = getScreenHeight() - COOP_BS_HALF_HEIGHT
+
+	Renderer.enableDefaultPlane(0, false)
+	Renderer.enableDefaultPlane(1, false)
+	Renderer.enableDefaultPlane(2, false)
+	Renderer.enableDefaultPlane(3, false)
+
+	// Background (plane B), scroll set 0 for the upper half and 2 for the lower half
+	u8 previousPlayer = coop.bs.activePlayer
+	for (u8 half = 0; half < 2; ++half)
+	{
+		coop.bs.useState(half)
+		u16 halfStart = u16(half) * lowerStart
+		u8 scrollSet = half * 2
+
+		Renderer.setupPlane(0, halfStart, screenWidth, COOP_BS_HALF_HEIGHT, 0x00, scrollSet, coop.bs.renderQueue(half, 0x0400))
+		Renderer.setupPlane(0, halfStart, screenWidth, COOP_BS_HALF_HEIGHT, 0x10, scrollSet, coop.bs.renderQueue(half, 0x0800))
+
+		// Plane shaders use absolute screen lines, so shift by the half's start
+		for (u16 line = 0; line < COOP_BS_HALF_HEIGHT; ++line)
+		{
+			Renderer.setScrollOffsetH(scrollSet, halfStart + line, 0 - u16(bluespheres.direction) * 4)
+		}
+		u16 scrollV = scrolloffset.y.planeB + COOP_BS_VIEW_TOP - halfStart
+		for (u8 column = 0; column < 0x20; ++column)
+		{
+			Renderer.setScrollOffsetV(scrollSet, column, scrollV)
+		}
+	}
+	coop.bs.useState(previousPlayer)
+
+	// Shared counters for blue spheres and rings at the top, like BlueSpheres.replacePlaneRendering
+	Renderer.setupPlane(0, 0, screenWidth / 2 - 80, 32, 0x11, 3, COOP_BS_QUEUE_SHARED + 0x100)
+	Renderer.setupPlane(screenWidth / 2 + 80, 0, screenWidth / 2 - 80, 32, 0x11, 3, COOP_BS_QUEUE_SHARED + 0x100)
+}
+
+function void coop.bs.renderNextObject()
+{
+	u16 originalQueue = 0xa000 - (A4 - 0xffffac00)
+	u32 objAddress = 0xffff0000 + u16[A4]
+	u8 half = coop.bs.getObjectHalf(objAddress)
+	if (half == 2)
+	{
+		renderNextObject()
+		return
+	}
+
+	A0 = objAddress
+	A4 += 2
+
+	// Special stage objects are screen-positioned (the camera stays at 0, 0)
+	D6.u8 = objA0.render_flags
+	objA0.render_flags |= render_flag.VISIBLE
+	D0.u16 = objA0.position.x.u16 + 0x80 - camera.foreground.x.u16
+	D1.u16 = objA0.position.y.u16 + 0x80 - camera.foreground.y.u16 + coop.bs.offsetY(half)
+
+	u16 renderQueue = coop.bs.renderQueue(half, originalQueue)
+	Renderer.clearSpriteTag()
+	if (Standalone.onWriteToSpriteTable(D0.u16 - 0x80, D1.u16 - 0x80, renderQueue))
+		return
+
+	A1 = objA0.mapping_offset
+	D4 = 0
+	if ((objA0.render_flags & render_flag.STATIC_MAPPING) == 0)
+	{
+		A1 = tableLookupAddress(A1, u16(objA0.animation.sprite) * 2)
+		D4.u16 = u16[A1] - 1
+		A1 += 2
+		if (D4.s16 < 0)
+			return
+	}
+	D5.u16 = objA0.sprite_attributes
+	writeToSpriteTable(renderQueue)
+}
+
+function void coop.bs.renderSprites()
+{
+	Renderer.resetSprites()
+
+	u16 screenWidth = getScreenWidth()
+	u16 lowerStart = getScreenHeight() - COOP_BS_HALF_HEIGHT
+	Renderer.setViewport(0, 0, screenWidth, COOP_BS_HALF_HEIGHT, COOP_BS_QUEUE_UPPER)
+	Renderer.setViewport(0, lowerStart, screenWidth, COOP_BS_HALF_HEIGHT, COOP_BS_QUEUE_LOWER)
+	Renderer.resetViewport(COOP_BS_QUEUE_SHARED)
+	Renderer.enableSecondaryPalette(lowerStart)
+
+	coop.bs.setupPlanes()
+
+	D7 = 0x4f
+	D6 = 0
+	A5 = 0xffffac00
+	A3 = addressof(camera.foreground.x)
+	A6 = 0xfffff800
+	while (A5 < 0xffffb000)
+	{
+		if (u16[A5] > 0)
+		{
+			A4 = A5 + 2
+			while (u16[A5] > 0)
+			{
+				coop.bs.renderNextObject()
+				u16[A5] -= 2
+			}
+		}
+		A5 += 0x80
+	}
+	Renderer.clearSpriteTag()
+
+	// A player who is out waits for the other one
+	for (u8 half = 0; half < 2; ++half)
+	{
+		if (coop.bs.isEliminated(half))
+		{
+			s32 py = s32(u16(half) * lowerStart) + COOP_BS_HALF_HEIGHT / 2 - 8
+			Renderer.drawText("oxyfont_regular:gradient:outline(0x000000ff,1,false):shadow(1,1,0.5f,0.8f)", screenWidth / 2, py, "AGUARDANDO O PARCEIRO", 0xffffffff, 5, 0, COOP_BS_QUEUE_SHARED + 0x800, false, true)
+		}
+	}
+}
+
+function void BlueSpheres.RenderSpheres()
+{
+	if (!coop.bs.isSplit())
+	{
+		base.BlueSpheres.RenderSpheres()
+		return
+	}
+
+	// Also updates each player's floor animation frame
+	coop.bs.useState(1)
+	coop.bs.renderHalf = 1
+	base.BlueSpheres.RenderSpheres()
+
+	coop.bs.useState(0)
+	coop.bs.renderHalf = 0
+	base.BlueSpheres.RenderSpheres()
+
+	coop.bs.renderHalf = 0xff
+}
+
+// Same as the original, with the position and render queue of the half
+function void BlueSpheres.renderCustomSpheres()
+{
+	if (coop.bs.renderHalf == 0xff)
+	{
+		base.BlueSpheres.renderCustomSpheres()
+		return
+	}
+
+	u8 half = coop.bs.renderHalf
+	s16 offsetY = coop.bs.offsetY(half)
+
+	u32 ptr = 0x800000
+	Game.writeBlueSpheresData(ptr, 0xfffff100, bluespheres.position.x, bluespheres.position.y, bluespheres.direction)
+
+	u16 count = u16[ptr]
+	ptr += 2
+	for (u16 i = 0; i < count; ++i)
+	{
+		u16 px = u16[ptr] + getScreenExtend() - 40
+		u16 py = u16[ptr+2]
+		u16 size = u16[ptr+4]
+		u8 sphereType = u8[ptr+6]
+		ptr += 7
+
+		u8 form
+		if (size < 0x1740)
+			form = 0x0f
+		else if (size < 0x18a0)
+			form = 0x0e
+		else if (size < 0x1a10)
+			form = 0x0d
+		else if (size < 0x1b90)
+			form = 0x0c
+		else if (size < 0x1d30)
+			form = 0x0b
+		else if (size < 0x1f00)
+			form = 0x0a
+		else if (size < 0x2100)
+			form = 0x09
+		else if (size < 0x2330)
+			form = 0x08
+		else if (size < 0x25a0)
+			form = 0x07
+		else if (size < 0x2960)
+			form = 0x06
+		else if (size < 0x2c80)
+			form = 0x05
+		else if (size < 0x3180)
+			form = 0x04
+		else if (size < 0x35c0)
+			form = 0x03
+		else if (size < 0x3c80)
+			form = 0x02
+		else if (size < 0x4500)
+			form = 0x01
+		else
+			form = 0x00
+
+		py -= (16 - form) * 2/3 + 1
+		py -= bluespheres.lifted_height
+		py += offsetY
+
+		bool behindHorizon = (size < 0x1b00)
+		u16 renderQueue = coop.bs.renderQueue(half, (behindHorizon ? 0x2000 : 0x9000) + size / 0x100)
+		u8 alpha = (sphereType == 0x0a) ? 0xa0 : 0xff
+		u32 fog = clamp(s32(0x100000) / size - 0x68, 0, 0x80) * 0x010101
+
+		D0.u16 = u8(sphereType) * 8
+		A3 = u32[0xffffe480 + D0.u16]
+		D6.u16 = u16[0xffffe480 + D0.u16 + 4]
+
+		D0.u16 = u16[0xffffe480 + D0.u16 + 6]
+		D1 = (D0.u16 & 0x8000) ? 0 : (form * 2)
+		D1.u16 += D0.u16 * 2
+		A3 = tableLookupAddress(A3, D1.s16)
+
+		D1.u16 = u16[A3] - 1
+		A3 += 2
+		while (D1.s16 >= 0)
+		{
+			if (Game.getSetting(SETTING_BS_VISUAL_STYLE) & 0x02)
+			{
+				Renderer.drawVdpSpriteWithTint(px + u16[A3+4], py + s8[A3], u8[A3+1], u16[A3+2] + D6.u16, renderQueue, (0xffffff - fog) + (u32(alpha) << 24), fog)
+			}
+			else
+			{
+				Renderer.drawVdpSprite(px + u16[A3+4], py + s8[A3], u8[A3+1], u16[A3+2] + D6.u16, renderQueue)
+			}
+
+			A3 += 6
+			--D1.s16
+		}
+	}
+}
+
+function void BlueSpheres.renderCustomGround()
+{
+	if (!coop.bs.isSplit())
+	{
+		base.BlueSpheres.renderCustomGround()
+		return
+	}
+
+	u8 previousPlayer = coop.bs.activePlayer
+	for (u8 half = 0; half < 2; ++half)
+	{
+		coop.bs.useState(half)
+		s16 offsetY = coop.bs.offsetY(half)
+
+		if (Game.getSetting(SETTING_BS_VISUAL_STYLE) & 0x02)
+		{
+			Renderer.drawSprite("bluespheres_glow_background", getScreenWidth() / 2, 20 + offsetY, 0x00, 0, coop.bs.renderQueue(half, 0x2000))
+		}
+
+		// Same as the original; the lower half gets its colors from the secondary palette (see fn000c50)
+		string spriteKey1
+		string spriteKey2
+		{
+			Game.setupBlueSpheresGroundSprites()
+
+			u16 px = bluespheres.position.x
+			u16 py = bluespheres.position.y
+			u8 rotation = bluespheres.direction
+			bool isRotating = (rotation & 0x3f) != 0
+			if (isRotating || (rotation & 0x40) == 0)
+				px = (px + 0x80) & 0xff00
+			if (isRotating || (rotation & 0x40) != 0)
+				py = (py + 0x80) & 0xff00
+
+			if (isRotating)
+			{
+				u8 rotationStep = (rotation & 0x3f) / 4
+				spriteKey1 = stringformat("bluespheres_ground_alpha_rotation_0x%02x", rotationStep)
+				spriteKey2 = stringformat("bluespheres_ground_opaque_rotation_0x%02x", rotationStep)
+			}
+			else
+			{
+				u8 movementStep = 0
+				if ((rotation & 0x80) == 0)
+				{
+					movementStep = (0xff - ((rotation & 0x40) ? px : py) & 0xff) / 8
+				}
+				else
+				{
+					movementStep = (((rotation & 0x40) ? px : py) & 0xff) / 8
+				}
+				spriteKey1 = stringformat("bluespheres_ground_alpha_movement_0x%02x", movementStep)
+				spriteKey2 = stringformat("bluespheres_ground_opaque_movement_0x%02x", movementStep)
+			}
+		}
+		Renderer.drawSprite(spriteKey1, 0, offsetY, 0x100, 0, coop.bs.renderQueue(half, 0x3000))
+		Renderer.drawSprite(spriteKey2, 0, offsetY, 0x100, SPRITE_FLAG_FULLY_OPAQUE, coop.bs.renderQueue(half, 0x3000))
+
+		if (Game.getSetting(SETTING_BS_VISUAL_STYLE) & 0x02)
+		{
+			Renderer.drawSprite("bluespheres_glow_foreground", getScreenWidth() / 2, 30 + offsetY, 0x00, 0, coop.bs.renderQueue(half, 0x3100))
+		}
+	}
+	coop.bs.useState(previousPlayer)
+}
+
+function void BlueSpheres.renderCustomCharacterShadows()
+{
+	if (!coop.bs.isSplit())
+	{
+		base.BlueSpheres.renderCustomCharacterShadows()
+		return
+	}
+
+	string key = (Game.getSetting(SETTING_BS_VISUAL_STYLE) & 0x02) ? "bluespheres_shadow_1P_smooth" : "bluespheres_shadow_1P_pixel"
+	for (u8 half = 0; half < 2; ++half)
+	{
+		Renderer.drawSprite(key, 143 + getScreenExtend(), 149 + coop.bs.offsetY(half), 0x00, 0, coop.bs.renderQueue(half, 0x3100))
+	}
+}
+
+
+// ============================================================
+//  Palette of the lower half (V-Int, 0x000c50)
+//  The checkerboard colors depend on the runner's grid position,
+//  and player 2 may be a character sharing palette line 0 with a
+//  different player 1 (Sonic and Knuckles).
+// ============================================================
+
+function void fn000c50()
+{
+	base.fn000c50()
+
+	if (!coop.bs.isSplit())
+		return
+
+	Renderer.enableSecondaryPalette(getScreenHeight() - COOP_BS_HALF_HEIGHT)
+
+	u8 previousPlayer = coop.bs.activePlayer
+	coop.bs.useState(1)
+
+	// Same as in fn000c50, but for player 2
+	u16 px = bluespheres.position.x
+	u16 py = bluespheres.position.y
+	u8 rotation = bluespheres.direction
+	bool isRotating = (rotation & 0x3f) != 0
+	if (isRotating || (rotation & 0x40) == 0)
+		px = (px + 0x80) & 0xff00
+	if (isRotating || (rotation & 0x40) != 0)
+		py = (py + 0x80) & 0xff00
+
+	bool parity = (((px + py) & 0x100) != 0) == ((rotation & 0x40) != 0)
+	if (!isRotating && (rotation & 0x80) == 0)
+	{
+		parity = !parity
+	}
+	coop.bs.useState(previousPlayer)
+
+	u32 fieldColorBaseAddress = bluespheres.palette.baseAddress
+	u32 colorA = unpackColor(u16[fieldColorBaseAddress + (parity ? 8 : 0)])
+	u32 colorB = unpackColor(u16[fieldColorBaseAddress + (parity ? 0 : 8)])
+
+	bool reducedColors = (Game.getSetting(SETTING_BS_VISUAL_STYLE) & 0x01) == 0
+	for (u16 i = 0; i < 60; ++i)
+	{
+		u8 blendFactor = reducedColors ? ((i / 30) * 0xff) : (i * 0xff / 59)
+		Renderer.setSecondaryPaletteColor(0x101 + i + (i / 15), 0xff000000 + applyGlobalComponentTint_BGR32(blendColors_BGR32(colorA, colorB, blendFactor)))
+	}
+	for (u16 i = 0; i < 15; ++i)
+	{
+		u8 blendFactor = reducedColors ? ((i / 8) * 0xff) : (i * 0xff / 14)
+		u32 baseColor = applyGlobalComponentTint_BGR32(blendColors_BGR32(colorA, colorB, blendFactor))
+		for (u16 k = 0; k < 12; ++k)
+		{
+			u32 alpha = reducedColors ? ((k / 6) * 0xff) : ((k + 1) * 0xff / 13)
+			Renderer.setSecondaryPaletteColor(0x141 + (11 - k) * 0x10 + i, (alpha << 24) + baseColor)
+		}
+	}
+
+	// Sonic and Knuckles both use the colors in palette line 0
+	u8 character = getSecondCharacter()
+	if (character != CHARACTER_TAILS && character != getMainCharacter())
+	{
+		u32 source = (character == CHARACTER_KNUCKLES) ? 0x0089ee : 0x00897e
+		for (u8 i = 0; i < 8; ++i)
+		{
+			// Only while there's no fade going on, which changes the colors
+			if (u16[0xfffffc10 + i * 2] == u16[0xfffffc90 + i * 2])
+			{
+				Renderer.setSecondaryPaletteColorPacked(8 + i, u16[source + i * 2])
+			}
+		}
+	}
+}
+
+#endif

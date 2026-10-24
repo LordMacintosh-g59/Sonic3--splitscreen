@@ -12,6 +12,23 @@
 
 ## Diário
 
+### 2026-10-24 — Special Stage (esferas azuis) em co-op com tela dividida
+- **Regras:** cada jogador corre sozinho pelo mesmo planeta (posição, direção, velocidade e pulo próprios). O mapa de esferas e o contador de azuis são compartilhados. Esfera vermelha elimina só quem bateu, e a metade dele mostra "AGUARDANDO O PARCEIRO". A esmeralda aparece na frente de quem ainda está vivo e qualquer um pode pegá-la. Com os dois fora, a fase termina como o game over original.
+- **Estado por jogador:** o estado de movimento (`bluespheres.*` de 0xffffe420+, mais `scrolloffset.y.planeB`) do jogador inativo fica em globais `coop.bs.other.*`. `coop.bs.useState(p)` troca os valores. O P2 (objeto 0xffffb04a, update 0x00927a) vira um corredor completo, com a mesma lógica do P1 (0x00903e) e o controle 2 no lugar do 1.
+- **Animação de coleta:** os slots de animação (0xffffa400) checam a posição do corredor. Cada slot guarda no byte 1 quem coletou, e `fn009e34` usa a posição dessa pessoa.
+- **Tela dividida:** cada metade mostra as linhas 58..169 da visão original de 224 linhas, de modo que os pés do personagem ficam na borda de baixo. Os itens de cada metade usam bandas de render queue: 0x1001..0x4fff em cima, 0x5001..0x8fff embaixo, e 0x9000+ para o que é compartilhado (HUD e textos). O céu (plano B) usa os scroll sets 0 e 2.
+- **Cores por metade:** o xadrez do chão depende da posição do corredor, então a metade de baixo usa a paleta secundária do motor (a da água), a partir da linha 112. A nova binding `Renderer.setSecondaryPaletteColor` grava cores com alfa. A mesma paleta corrige as cores da linha 0 quando P1 e P2 são Sonic e Knuckles.
+- **Largada:** o texto "Get Blue Spheres" dá a largada automática nos dois jogadores.
+- **Personagens:** o A.I.R. desenha os personagens do estágio a partir da ROM (`Standalone.onWriteToSpriteTable`, que usa `getSecondCharacter()` para o P2), então a VRAM não precisa ser alterada.
+- **Verificado com atalho temporário para o estágio, já removido:**
+  - tela dividida com visões independentes;
+  - P2 virando sozinho;
+  - eliminação de um jogador, com o outro seguindo sozinho;
+  - os dois fora encerram a fase;
+  - coleta pelo P1 com `CHEAT_ONE_BLUE_SPHERE` levando à esmeralda.
+- **Não verificado:** a esmeralda pega pelo P2 (usa o mesmo código, com o estado do P2 ativo) e a jogabilidade em estágios longos com dois humanos.
+- **Observação:** sem comando, em alguns estágios o corredor bate numa esfera vermelha logo na largada. Isso também acontece no modo de 1 jogador.
+
 ### 2026-10-24 — Hooks de endereço ignoravam overrides com scripts do cache
 - **Sintoma:** com Knuckles (ou Sonic) no P2, o controle do P1 movia os dois. Era intermitente: funcionava logo depois de editar um `.lemon` e falhava nas execuções seguintes.
 - **Causa:** quando os scripts vêm de `scripts.bin` (cache em `saves/` ou `gamedata.bin` do jogo instalado), o módulo desserializado não é registrado no `GlobalsLookup`. Por isso `collectHooksFromFunctions` não achava o override mais profundo, e o hook `0x01656c` chamava a `Character.UpdateNormalState.Knuckles` original, que lê `control.pad1`. Medido com contadores: 0 chamadas ao override vindo do cache, cerca de 900 com o script recém-compilado. O Tails só escapava porque a base dele já lê `control.tails`.
