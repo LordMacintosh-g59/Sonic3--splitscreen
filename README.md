@@ -1,3 +1,11 @@
+﻿# Sonic3--splitscreen
+A splitscreen game of Sonic 3 and Knuckles, from Sega Genesis.
+
+Co-op local para 2 jogadores com tela dividida, baseado no Sonic 3 A.I.R. (GPLv3).
+Documentação do co-op: [coop-docs/README.md](coop-docs/README.md) — diário técnico em [coop-docs/NOTES.md](coop-docs/NOTES.md).
+O código do co-op está no branch `coop`. A ROM do jogo não faz parte do repositório.
+
+---
 # Sonic 3 A.I.R.
 
 Source code incl. dependencies for "Sonic 3 - Angel Island Revisited", a fan-made remaster of Sonic 3 & Knuckles.
