@@ -112,3 +112,6 @@ Oxygen/sonic3air/*.bin
 # Pacote de distribuição e instalador gerados
 /dist/
 /installer/output/
+
+# Instalador publicado no repositÃ³rio (gerado por installer/gerar-instalador.ps1)
+!/installer/Instalar-Sonic3-Coop.exe

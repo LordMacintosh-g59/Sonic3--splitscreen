@@ -37,4 +37,7 @@ Copy-Item (Join-Path $game "_master_image_template\doc\license-thirdparty") (Joi
 # Compila o instalador
 Push-Location $PSScriptRoot
 try { & $iscc "sonic3coop.iss" } finally { Pop-Location }
-Write-Host "Instalador: $(Join-Path $PSScriptRoot 'output\Instalar-Sonic3-Coop.exe')"
+
+# Copia versionada no repositório, ao lado deste script
+Copy-Item (Join-Path $PSScriptRoot "output\Instalar-Sonic3-Coop.exe") $PSScriptRoot -Force
+Write-Host "Instalador: $(Join-Path $PSScriptRoot 'Instalar-Sonic3-Coop.exe')"
